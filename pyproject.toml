@@ -1,0 +1,27 @@
+[project]
+name = "byte-sampling"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "PythonNut", email = "PythonNut@users.noreply.github.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "accelerate>=1.8.1",
+    "ahocorasick-rs>=0.22.2",
+    "pysimdjson>=7.0.2",
+    "tokenizers>=0.21.2",
+    "torch>=2.7.1",
+    "tqdm>=4.67.1",
+    "transformers>=4.53.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "ipython>=9.4.0",
+]
