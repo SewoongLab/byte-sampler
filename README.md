@@ -17,7 +17,7 @@ You can access this project's functionality via the `byte_sampler` module.
 You can then sample from a model byte-wise:
 
 ```python
-from byte_sampler import *
+from byte_sampling import *
 
 # load in a model
 bc = ByteConditioning("meta-llama/Llama-3.1-8B")
