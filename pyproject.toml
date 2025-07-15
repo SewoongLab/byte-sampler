@@ -24,4 +24,5 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "ipython>=9.4.0",
+    "matplotlib>=3.10.3",
 ]
