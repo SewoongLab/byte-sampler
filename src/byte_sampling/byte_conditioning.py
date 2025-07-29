@@ -261,11 +261,8 @@ class ByteConditioning(object):
                 if not (a == found_a and b == found_b):
                     continue
 
-                # if verbose:
-                #     print('merge', order, i)
                 ab = merge_map[(a, b)]
                 if ab in resolve_map:
-                    # print(ab, a, b, resolve_map[ab])
                     assert resolve_map[ab] == (a, b)
                 else:
                     resolve_map[ab] = a, b
@@ -592,7 +589,9 @@ class ByteConditioning(object):
                 copy_tokens = []
                 for b in suffix:
                     copy_tokens.extend(self_copy.push(b))
-                tree = self_copy.eval_tree(inclusive=inclusive)
+                tree = self_copy.eval_tree(
+                    inclusive=inclusive, filter_tensors=filter_tensors
+                )
                 for tid in reversed(copy_tokens):
                     tree = {tid: tree}
                 return tree
@@ -626,8 +625,9 @@ class ByteConditioning(object):
                     subtree, was_last = convert_tree(child)
                     if subtree:
                         converted_node[tid] = subtree
-                        if None in converted_node and was_last:
-                            valid_tokens = converted_node[None]
+                        if (
+                            valid_tokens := converted_node.get(None)
+                        ) is not None and was_last:
                             converted_node[None] = valid_tokens[valid_tokens != tid]
                             if len(converted_node[None]) == 0:
                                 converted_node.pop(None)
@@ -830,7 +830,9 @@ class ByteConditioning(object):
             stop_override=None,
         ):
             self.bc = bc
-            self.rcm = RadixCacheManager(self.bc.model, self.bc.tokenizer)
+            self.rcm = RadixCacheManager(
+                self.bc.model, self.bc.tokenizer, warn_on_resurrection=True
+            )
             self.tic = bc.token_index_cache
             self.batch_size = batch_size
             self.sbps = [bc.get_streaming_byte_pretok() for _ in range(batch_size)]
