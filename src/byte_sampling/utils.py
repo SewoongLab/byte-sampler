@@ -3,16 +3,11 @@ from __future__ import annotations
 import heapq
 import itertools
 import os
-from dataclasses import dataclass, field
-from functools import partial
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-import io
-import gzip
-import simdjson as json
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple, Any, Self
 import torch
 
-import tqdm.auto as tqdm
+import torch.nn.functional as F
 
 
 def ensure_dir(d):
@@ -46,6 +41,7 @@ def trie_lookup(trie, key):
         node = node[b]
     return node.get(None, False)
 
+
 def walk_trie(trie):
     results = []
     if trie.get(None):
@@ -57,6 +53,7 @@ def walk_trie(trie):
                 results.append([b] + rest)
 
     return results
+
 
 def bytes_to_unicode():
     """
@@ -156,22 +153,13 @@ class PriorityQueue:
         return len(self.entry_finder)
 
 
-def get_file_len(f):
-    cur = f.tell()
-    f.seek(0, os.SEEK_END)
-    out = f.tell()
-    f.seek(cur)
-    return out
-
-
-def sample_from_logits(
+def probs_from_logits(
     logits: torch.Tensor,
     do_sample: bool = True,
     temperature: float = 1,
     top_k: float | None = None,
     top_p: float | None = None,
     filter_value: float = -float("Inf"),
-    generator: torch.Generator | None = None,
 ):
     # Adapted from https://gist.github.com/bsantraigi/5752667525d88d375207f099bd78818b
     if not do_sample or temperature < 1e-4:
@@ -200,22 +188,28 @@ def sample_from_logits(
     scaled = (logits - logits.max()) / temperature
     probs = torch.softmax(scaled, dim=-1)
 
+    return probs
+
+
+def sample_from_logits(
+    logits: torch.Tensor,
+    do_sample: bool = True,
+    temperature: float = 1,
+    top_k: float | None = None,
+    top_p: float | None = None,
+    filter_value: float = -float("Inf"),
+    generator: torch.Generator | None = None,
+):
+    probs = probs_from_logits(
+        logits=logits,
+        do_sample=do_sample,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        filter_value=filter_value,
+    )
+
     return torch.multinomial(probs, 1, generator=generator)[..., 0]
-
-
-def read_json(path: PathOrStr) -> Dict[str, Any]:
-    with open(path, "r") as f:
-        return json.load(f)
-
-
-def seed_all(seed: int):
-    import random
-    import numpy as np
-
-    if seed < 0 or seed > 2**32 - 1:
-        raise ValueError(f"Seed {seed} is invalid. It must be on [0; 2^32 - 1]")
-    random.seed(seed)
-    np.random.seed(seed)
 
 
 def scatter_logsumexp(
