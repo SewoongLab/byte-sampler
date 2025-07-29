@@ -17,6 +17,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from .utils import DoublyLinkedList, bytes_to_unicode, scatter_logsumexp, build_trie
 from .radix_cache import RadixCacheManager
 
+
 class BaseBytewiseBatchSampler(ABC):
     @abstractmethod
     def add_context(self, prompts: list[Union[str, bytes]]):
@@ -70,16 +71,24 @@ class ByteConditioning(object):
             self.tokenizer = tokenizer
         else:
             load_kwargs = (
-                dict(device_map="auto", torch_dtype=torch.bfloat16) if load_kwargs is None else load_kwargs
+                dict(device_map="auto", torch_dtype=torch.bfloat16)
+                if load_kwargs is None
+                else load_kwargs
             )
             if not skip_model:
-                self.model = AutoModelForCausalLM.from_pretrained(model_or_dir, **load_kwargs)
+                self.model = AutoModelForCausalLM.from_pretrained(
+                    model_or_dir, **load_kwargs
+                )
             else:
                 self.model = None
             self.tokenizer = AutoTokenizer.from_pretrained(model_or_dir)
 
-        self.device = self.model.device if self.model is not None else torch.get_default_device()
-        self.dtype = self.model.dtype if self.model is not None else torch.get_default_dtype()
+        self.device = (
+            self.model.device if self.model is not None else torch.get_default_device()
+        )
+        self.dtype = (
+            self.model.dtype if self.model is not None else torch.get_default_dtype()
+        )
 
         self.btok = self.tokenizer.backend_tokenizer
         self.bos = self.tokenizer.bos_token_id or self.tokenizer.eos_token_id
@@ -109,7 +118,9 @@ class ByteConditioning(object):
             [tok["content"] for tok in added_tokens if tok["normalized"]],
             matchkind=MatchKind.LeftmostLongest,
         )
-        self.split_normalized_ids = [tok["id"] for tok in added_tokens if tok["normalized"]]
+        self.split_normalized_ids = [
+            tok["id"] for tok in added_tokens if tok["normalized"]
+        ]
         if self.btok.normalizer is not None:
             assert not self.split_normalized_ids
 
@@ -139,7 +150,11 @@ class ByteConditioning(object):
         for pt in raw_state["pre_tokenizer"]["pretokenizers"]:
             if pt["type"] == "Digits" and not pt["individual_digits"]:
                 pass
-            elif pt["type"] == "ByteLevel" and not pt["add_prefix_space"] and not pt["use_regex"]:
+            elif (
+                pt["type"] == "ByteLevel"
+                and not pt["add_prefix_space"]
+                and not pt["use_regex"]
+            ):
                 has_bytelevel = True
             elif pt["type"] == "Split" and (
                 (pt["behavior"] == "Isolated" and not pt["invert"])
@@ -150,14 +165,21 @@ class ByteConditioning(object):
                 if digit3_right_just_re in regexes:
                     self.has_digit3_right_just = True
                     for i in range(0, 1000):
-                        assert str(i).encode() in self.vocab, f"Digit {i} is missing from the vocab!"
+                        assert (
+                            str(i).encode() in self.vocab
+                        ), f"Digit {i} is missing from the vocab!"
 
                 if whitespace_lookahead_re in regexes:
                     self.has_whitespace_lookahead = True
                     assert whitespace_newline_exception_re in regexes
-                    assert regexes.index(whitespace_newline_exception_re) < regexes.index(whitespace_lookahead_re)
+                    assert regexes.index(
+                        whitespace_newline_exception_re
+                    ) < regexes.index(whitespace_lookahead_re)
 
-                if contraction_merge_re in regexes and contraction_bridge_re not in regexes:
+                if (
+                    contraction_merge_re in regexes
+                    and contraction_bridge_re not in regexes
+                ):
                     self.has_contraction_discontinuity = True
             else:
                 print(f"Unknown pretokenizer {pt}")
@@ -215,7 +237,9 @@ class ByteConditioning(object):
         resolve_map = {}
 
         def resolve_subtokens(buffer: bytes, verbose=False):
-            ll = DoublyLinkedList([(i, self.vocab[bytes([b])]) for i, b in enumerate(buffer)])
+            ll = DoublyLinkedList(
+                [(i, self.vocab[bytes([b])]) for i, b in enumerate(buffer)]
+            )
             q = []
 
             def maybe_add_merge(node):
@@ -264,7 +288,9 @@ class ByteConditioning(object):
 
         self.unreachable_tokens = set()
         skip = 0
-        for tbytes, tid in sorted(self.vocab.items(), key=lambda pair: len(pair[0]), reverse=True):
+        for tbytes, tid in sorted(
+            self.vocab.items(), key=lambda pair: len(pair[0]), reverse=True
+        ):
             if len(tbytes) == 1:
                 continue
             if tid not in resolve_map:
@@ -434,7 +460,6 @@ class ByteConditioning(object):
         candidates = self._get_walk_cached(prefix)
         return np.setdiff1d(candidates, invalid, assume_unique=True)
 
-
     class StreamingBPE:
         @dataclass
         class Node:
@@ -483,7 +508,9 @@ class ByteConditioning(object):
                 new_heads.append(head)
                 if (newtid := trie.get(None)) is not None:
                     # if head.parent is None or self.tcs._valid_adj(head.last_tid, newtid):
-                    if head.parent is None or self.tcs._valid_adj(head.last_tid, newtid):
+                    if head.parent is None or self.tcs._valid_adj(
+                        head.last_tid, newtid
+                    ):
                         newhead = self.Node(newtid, head, {}, self.tcs.vtrie, [])
                         self.last_head = newhead
                         head.children[newhead.last_tid] = newhead
@@ -506,7 +533,9 @@ class ByteConditioning(object):
             assert (
                 len(heads_created) <= 1 or self.tcs.has_ignore_merges
             ), f"got multiple paths to the same byte: {[trace_path(h) for h in heads_created]}"
-            assert len(heads_created) >= 1, f"sequence ending in {bytes([byte])!r} cannot be tokenized"
+            assert (
+                len(heads_created) >= 1
+            ), f"sequence ending in {bytes([byte])!r} cannot be tokenized"
             self.heads = new_heads
 
             while len(self.tree.children) == 1:
@@ -537,12 +566,17 @@ class ByteConditioning(object):
 
             def copy_tree(node: self.Node, parent: Optional[self.Node] = None):
                 nonlocal new_last_head
-                newnode = self.Node(node.last_tid, parent, None, node.trie, copy(node.trie_path))
+                newnode = self.Node(
+                    node.last_tid, parent, None, node.trie, copy(node.trie_path)
+                )
                 if node in self.heads:
                     new_heads.append(newnode)
                 if node is self.last_head:
                     new_last_head = newnode
-                newnode.children = {tid: copy_tree(child, newnode) for tid, child in node.children.items()}
+                newnode.children = {
+                    tid: copy_tree(child, newnode)
+                    for tid, child in node.children.items()
+                }
                 return newnode
 
             new.tree = copy_tree(self.tree)
@@ -569,7 +603,9 @@ class ByteConditioning(object):
                     if filter_tensors:
                         # print(f"tree: {node.last_tid}, {bytes(node.trie_path) + suffix!r}")
                         valid_tokens = torch.from_numpy(
-                            self.tcs._valid_r_filtered(node.last_tid, bytes(node.trie_path))
+                            self.tcs._valid_r_filtered(
+                                node.last_tid, bytes(node.trie_path)
+                            )
                             # self.tcs._get_walk_cached(bytes(node.trie_path)),
                         ).to(device=self.tcs.device)
                     else:
@@ -580,7 +616,9 @@ class ByteConditioning(object):
                         )
                         for i, b in enumerate(node.trie_path):
                             mask &= self.tcs.token_index_cache.get(i) == b
-                        valid_tokens = torch.arange(self.tcs.tokenizer.vocab_size, device=self.tcs.device)[mask]
+                        valid_tokens = torch.arange(
+                            self.tcs.tokenizer.vocab_size, device=self.tcs.device
+                        )[mask]
                     if len(valid_tokens) > 0:
                         converted_node[None] = valid_tokens
 
@@ -598,7 +636,9 @@ class ByteConditioning(object):
                     if not inclusive:
                         return {}, True
                     else:
-                        converted_node[None] = torch.arange(self.tcs.tokenizer.vocab_size, device=self.tcs.device)
+                        converted_node[None] = torch.arange(
+                            self.tcs.tokenizer.vocab_size, device=self.tcs.device
+                        )
                         # converted_node[None] = slice(len(self.tcs.vocab))
 
                 return converted_node, node is self.last_head
@@ -616,7 +656,9 @@ class ByteConditioning(object):
             self.previous_sbpe = None
             self.held_tokens = None
             self.previous_held_tokens = None
-            self.pretokenize = tcs.tokenizer.backend_tokenizer.pre_tokenizer.pre_tokenize_str
+            self.pretokenize = (
+                tcs.tokenizer.backend_tokenizer.pre_tokenizer.pre_tokenize_str
+            )
             self.buf = ""
 
         def push(self, char: str):
@@ -657,7 +699,9 @@ class ByteConditioning(object):
             self.held_tokens = None
             self.previous_held_tokens = None
 
-            if self.tcs.has_whitespace_lookahead and regex.search(r"\s[^\S\r\n]$", self.buf):
+            if self.tcs.has_whitespace_lookahead and regex.search(
+                r"\s[^\S\r\n]$", self.buf
+            ):
                 # TODO: double check this regex
                 self.previous_sbpe = self.sbpe
                 self.sbpe = self.sbpe.fork()
@@ -690,7 +734,9 @@ class ByteConditioning(object):
             return self.sbpe.split()
 
         def eval_tree(self, suffix=b"", inclusive=False, filter_tensors=True):
-            current_tree = self.sbpe.eval_tree(suffix=suffix, inclusive=inclusive, filter_tensors=filter_tensors)
+            current_tree = self.sbpe.eval_tree(
+                suffix=suffix, inclusive=inclusive, filter_tensors=filter_tensors
+            )
             if self.previous_sbpe is None:
                 assert self.held_tokens is None
                 return current_tree
@@ -725,7 +771,9 @@ class ByteConditioning(object):
             return merge_trees(current_tree, previous_tree)
 
     def get_streaming_char_pretok(self):
-        assert not self.has_digit3_right_just, "Cannot support streaming with right aligned digit groups!"
+        assert (
+            not self.has_digit3_right_just
+        ), "Cannot support streaming with right aligned digit groups!"
         return self.StreamingCharPretok(self)
 
     class StreamingBytePretok:
@@ -757,7 +805,9 @@ class ByteConditioning(object):
     def get_streaming_byte_pretok(self):
         return self.StreamingBytePretok(self)
 
-    def streaming_bpe_open(self, text: Union[str, bytes], inclusive=False, suffix=b"", filter_tensors=True):
+    def streaming_bpe_open(
+        self, text: Union[str, bytes], inclusive=False, suffix=b"", filter_tensors=True
+    ):
         if isinstance(text, str):
             S = self.get_streaming_char_pretok()
         else:
@@ -766,7 +816,9 @@ class ByteConditioning(object):
         trunk = []
         for atom in text:
             trunk.extend(S.push(atom))
-        return trunk, S.eval_tree(inclusive=inclusive, suffix=suffix, filter_tensors=True)
+        return trunk, S.eval_tree(
+            inclusive=inclusive, suffix=suffix, filter_tensors=True
+        )
 
     class BytewiseBatchSampler(BaseBytewiseBatchSampler):
         def __init__(
@@ -774,6 +826,7 @@ class ByteConditioning(object):
             bc: "ByteConditioning",
             batch_size=1,
             filter_tensors=False,
+            do_gc=True,
             stop_override=None,
         ):
             self.bc = bc
@@ -786,11 +839,16 @@ class ByteConditioning(object):
             self.trunk_lens = [0 for _ in range(batch_size)]
             self.total_dist_time = 0
             self.filter_tensors = filter_tensors
+            self.do_gc = do_gc
             self.stop_tokens = (
                 stop_override
                 if stop_override is not None
                 else torch.tensor(
-                    [tid for tid, at in bc.tokenizer.added_tokens_decoder.items() if at.special],
+                    [
+                        tid
+                        for tid, at in bc.tokenizer.added_tokens_decoder.items()
+                        if at.special
+                    ],
                     device=bc.device,
                 )
             )
@@ -819,33 +877,54 @@ class ByteConditioning(object):
                     self.trunk_lens[i] = 0
                     self.lens[i] = 0
 
-        def get_dists(self):
-            all_branches = [sbp.eval_tree(inclusive=True, filter_tensors=self.filter_tensors) for sbp in self.sbps]
-            results = self.rcm.query([*zip(self.trunks, all_branches)], skip_trunk_logprobs=True, do_gc=False)
+        def get_dists(self, filter_tensors=None, do_gc=None):
+            if filter_tensors is None:
+                filter_tensors = self.filter_tensors
+            if do_gc is None:
+                do_gc = self.do_gc
+
+            # compute what token probabilities are needed
+            all_branches = [
+                sbp.eval_tree(inclusive=True, filter_tensors=filter_tensors)
+                for sbp in self.sbps
+            ]
+
+            # execute the token-level query
+            results = self.rcm.query(
+                [*zip(self.trunks, all_branches)], skip_trunk_logprobs=True, do_gc=do_gc
+            )
+
+            # aggregate the token-level probabilities into byte-level ones
             dists = []
             start = time.perf_counter()
             for i, (branches, result) in enumerate(zip(all_branches, results)):
                 _, logprob_tree = result
                 byte_logprobs = []
-                stop_probs = []
+                stop_logprobs = []
 
+                # walk the tree
                 def extract_bytes(eval_tree, lp_tree, past_bytes=0):
-                    nonlocal stop_probs
                     for tid, lp_subtree in lp_tree.items():
                         eval_subtree = eval_tree[tid]
                         if tid is None:
                             subset = eval_subtree
-                            idx = self.lens[i] - past_bytes
-                            if idx == 0:
-                                stop_probs.append(torch.logsumexp(lp_subtree[self.stop_tokens], 0))
+                            # how many bytes until the end of the prompt
+                            prompt_offset = self.lens[i] - past_bytes
+
+                            if prompt_offset == 0:
+                                # only process special tokens at the end of the prompt
+                                stop_logprobs.append(
+                                    torch.logsumexp(lp_subtree[self.stop_tokens], 0)
+                                )
+
                             # if idx > 0:
                             #     # the previous byte should be fixed by the prompt
                             #     assert len(self.tic.get(idx - 1)[subset].unique()) == 1
-                            selectors, lp_subset = (
-                                self.tic.get(idx)[subset],
-                                lp_subtree[subset],
+                            selectors = self.tic.get(prompt_offset)[subset]
+                            lp_subset = lp_subtree[subset]
+                            byte_logprobs.append(
+                                scatter_logsumexp(lp_subset, selectors, dim_size=257)
                             )
-                            byte_logprobs.append(scatter_logsumexp(lp_subset, selectors, dim_size=257))
 
                         else:
                             extract_bytes(
@@ -855,12 +934,14 @@ class ByteConditioning(object):
                             )
 
                 extract_bytes(branches, logprob_tree, self.trunk_lens[i])
-                stop_prob = torch.logsumexp(torch.tensor(stop_probs, device=self.bc.device), 0)
+                stop_logprob = torch.logsumexp(
+                    torch.tensor(stop_logprobs, device=self.bc.device), 0
+                )
                 dists.append(
                     torch.hstack(
                         [
                             torch.logsumexp(torch.vstack(byte_logprobs)[:, :-1], 0),
-                            stop_prob,
+                            stop_logprob,
                         ]
                     )
                 )
