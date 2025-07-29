@@ -771,17 +771,17 @@ class ByteConditioning(object):
     class BytewiseBatchSampler(BaseBytewiseBatchSampler):
         def __init__(
             self,
-            tcs: "ByteConditioning",
+            bc: "ByteConditioning",
             batch_size=1,
             filter_tensors=False,
             stop_override=None,
         ):
-            self.tcs = tcs
-            self.rcm = RadixCacheManager(self.tcs.model, self.tcs.tokenizer)
-            self.tic = tcs.token_index_cache
+            self.bc = bc
+            self.rcm = RadixCacheManager(self.bc.model, self.bc.tokenizer)
+            self.tic = bc.token_index_cache
             self.batch_size = batch_size
-            self.sbps = [tcs.get_streaming_byte_pretok() for _ in range(batch_size)]
-            self.trunks = [[self.tcs.bos] for _ in range(batch_size)]
+            self.sbps = [bc.get_streaming_byte_pretok() for _ in range(batch_size)]
+            self.trunks = [[self.bc.bos] for _ in range(batch_size)]
             self.lens = [0 for _ in range(batch_size)]
             self.trunk_lens = [0 for _ in range(batch_size)]
             self.total_dist_time = 0
@@ -790,8 +790,8 @@ class ByteConditioning(object):
                 stop_override
                 if stop_override is not None
                 else torch.tensor(
-                    [tid for tid, at in tcs.tokenizer.added_tokens_decoder.items() if at.special == True],
-                    device=tcs.device,
+                    [tid for tid, at in bc.tokenizer.added_tokens_decoder.items() if at.special],
+                    device=bc.device,
                 )
             )
 
@@ -799,15 +799,15 @@ class ByteConditioning(object):
             assert len(prompts) == self.batch_size
             for i, prompt in enumerate(prompts):
                 if isinstance(prompt, str):
-                    if self.tcs.btok.normalizer is not None:
-                        prompt = self.tcs.btok.normalizer.normalize_str(prompt)
+                    if self.bc.btok.normalizer is not None:
+                        prompt = self.bc.btok.normalizer.normalize_str(prompt)
                     prompt = prompt.encode()
 
                 self.lens[i] += len(prompt)
                 for b in prompt:
                     new_tokens = self.sbps[i].push(b)
                     for tid in new_tokens:
-                        self.trunk_lens[i] += len(self.tcs.vrev.get(tid, 0))
+                        self.trunk_lens[i] += len(self.bc.vrev.get(tid, 0))
                     self.trunks[i].extend(new_tokens)
 
         def add_special_context(self, prompts: list[list[int]]):
@@ -851,11 +851,11 @@ class ByteConditioning(object):
                             extract_bytes(
                                 eval_subtree,
                                 lp_subtree,
-                                past_bytes + len(self.tcs.vrev.get(tid, b"")),
+                                past_bytes + len(self.bc.vrev.get(tid, b"")),
                             )
 
                 extract_bytes(branches, logprob_tree, self.trunk_lens[i])
-                stop_prob = torch.logsumexp(torch.tensor(stop_probs, device=self.tcs.device), 0)
+                stop_prob = torch.logsumexp(torch.tensor(stop_probs, device=self.bc.device), 0)
                 dists.append(
                     torch.hstack(
                         [
@@ -870,5 +870,3 @@ class ByteConditioning(object):
 
     def get_bytewise_sampler(self, batch_size=1):
         return self.BytewiseBatchSampler(self, batch_size=batch_size)
-
-

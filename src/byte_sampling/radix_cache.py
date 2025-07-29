@@ -67,7 +67,7 @@ class RadixCacheManager:
             assert self.gc_gen == 1
             self.cache_meta = [self.SequenceCache() for _ in range(bsize)]
 
-        assert len(self.cache_meta) == bsize, f"cannot change batch size"
+        assert len(self.cache_meta) == bsize, "cannot change batch size"
 
         # linearize the eval trees
         all_new_tokens, all_token_backrefs = [], []
@@ -252,7 +252,6 @@ class RadixCacheManager:
                 # set the last new_pad_tokens[i] entries to pad tokens
                 for j in range(new_cache_size - new_pad_tokens[i], new_cache_size):
                     seq_cache.seq[j] = self._make_pad_token(j, seq_cache)
-                pass
 
         self.total_tensor_time += time.perf_counter() - tensor_start
         self.total_request_time += time.perf_counter() - request_start

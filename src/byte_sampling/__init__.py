@@ -6,6 +6,7 @@ import torch
 from .byte_conditioning import ByteConditioning
 from .utils import sample_from_logits
 
+
 class EnsembleBytewiseSamplerFactory:
     def __init__(self, *args, **kwargs):
         self.args = args
@@ -16,10 +17,10 @@ class EnsembleBytewiseSamplerFactory:
 
 
 class EnsembleBytewiseSampler:
-    def __init__(self, batch_size, tcss: list[ByteConditioning], mode="mix", **kwargs):
+    def __init__(self, batch_size, bcs: list[ByteConditioning], mode="mix", **kwargs):
         self.batch_size = batch_size
-        self.tcss = tcss
-        self.bss = [tcs.get_bytewise_sampler(self.batch_size) for tcs in tcss]
+        self.bcs = bcs
+        self.bss = [bc.get_bytewise_sampler(self.batch_size) for bc in bcs]
         self.mode = mode
         self.kwargs = kwargs
 
@@ -47,10 +48,10 @@ class BytewisePromptTemplateFactory:
 
 
 class BytewisePromptTemplate:
-    def __init__(self, batch_size, tcs, prefix, suffix, **kwargs):
+    def __init__(self, batch_size, bc, prefix, suffix, **kwargs):
         self.batch_size = batch_size
-        self.tcs = tcs
-        self.bs = tcs.get_bytewise_sampler(batch_size)
+        self.bc = bc
+        self.bs = bc.get_bytewise_sampler(batch_size)
         self.kwargs = kwargs
         self.prompt_added = False
         self.template_prefix, self.template_suffix = prefix, suffix
@@ -79,27 +80,27 @@ class BytewisePromptTemplate:
 
 
 class BytewiseInstructFactory:
-    def __init__(self, tcs, extra_suffix="", *args, **kwargs):
-        self.tcs = tcs
+    def __init__(self, bc, extra_suffix="", *args, **kwargs):
+        self.bc = bc
         self.args = args
         self.kwargs = kwargs
         self.prefix, self.suffix = self.extract_chat_template(extra_suffix)
 
     def extract_chat_template(self, extra_suffix):
         sentinel = str(uuid.uuid4())
-        template = self.tcs.tokenizer.apply_chat_template(
+        template = self.bc.tokenizer.apply_chat_template(
             [{"role": "user", "content": sentinel}],
             tokenize=False,
             add_generation_prompt=True,
         )
         prefix, suffix = template.split(sentinel)
-        return self.tcs.tokenizer.encode(
+        return self.bc.tokenizer.encode(
             prefix, add_special_tokens=False
-        ), self.tcs.tokenizer.encode(suffix + extra_suffix, add_special_tokens=False)
+        ), self.bc.tokenizer.encode(suffix + extra_suffix, add_special_tokens=False)
 
     def get_bytewise_sampler(self, batch_size):
         return BytewisePromptTemplate(
-            batch_size, self.tcs, self.prefix, self.suffix, *self.args, **self.kwargs
+            batch_size, self.bc, self.prefix, self.suffix, *self.args, **self.kwargs
         )
 
 
@@ -111,8 +112,8 @@ class BytewiseQAFactory:
     q: Question: {question} (if answer=None, else equivalent to qa)
     """
 
-    def __init__(self, tcs, mode="qa", *args, **kwargs):
-        self.tcs = tcs
+    def __init__(self, bc, mode="qa", *args, **kwargs):
+        self.bc = bc
         self.args = args
         self.kwargs = kwargs
 
@@ -127,7 +128,7 @@ class BytewiseQAFactory:
 
     def get_bytewise_sampler(self, batch_size):
         return BytewisePromptTemplate(
-            batch_size, self.tcs, self.prefix, self.suffix, *self.args, **self.kwargs
+            batch_size, self.bc, self.prefix, self.suffix, *self.args, **self.kwargs
         )
 
 
@@ -142,15 +143,15 @@ class BytewiseProxyTuningFactory:
 
 class BytewiseProxyTuning:
     def __init__(
-        self, batch_size, tcs_base, tcs_expert, tcs_antiexpert, alpha=1, **kwargs
+        self, batch_size, bc_base, bc_expert, bc_antiexpert, alpha=1, **kwargs
     ):
         self.batch_size = batch_size
-        self.tcs_base = tcs_base
-        self.tcs_expert = tcs_expert
-        self.tcs_antiexpert = tcs_antiexpert
-        self.bs_base = tcs_base.get_bytewise_sampler(batch_size=batch_size)
-        self.bs_expert = tcs_expert.get_bytewise_sampler(batch_size=batch_size)
-        self.bs_antiexpert = tcs_antiexpert.get_bytewise_sampler(batch_size=batch_size)
+        self.bc_base = bc_base
+        self.bc_expert = bc_expert
+        self.bc_antiexpert = bc_antiexpert
+        self.bs_base = bc_base.get_bytewise_sampler(batch_size=batch_size)
+        self.bs_expert = bc_expert.get_bytewise_sampler(batch_size=batch_size)
+        self.bs_antiexpert = bc_antiexpert.get_bytewise_sampler(batch_size=batch_size)
         self.bss = [self.bs_base, self.bs_expert, self.bs_antiexpert]
         self.kwargs = kwargs
         self.alpha = alpha
