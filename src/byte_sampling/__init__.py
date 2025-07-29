@@ -197,16 +197,12 @@ def generate_batched(
     include_stop_str_in_output: bool = False,
     allow_special: bool = True,
 ):
-    assert not isinstance(stop_strings, str)
+    assert not isinstance(
+        stop_strings, str
+    ), "stop_strings should be a sequence of strings"
     stop_strings = tuple(sorted(stop_strings, key=len, reverse=True))
     assert not isinstance(prompts, str)
-
-    if seed is not None:
-        assert generator is None, "can pass only one of seed/generator"
-        generator = torch.Generator().manual_seed(seed)
-
-    elif generator is not None:
-        assert seed is None, "can pass only one of seed/generator"
+    assert seed is None or generator is None, "can pass only one of seed/generator"
 
     bsize = len(prompts)
     assert not (display and bsize > 1)
@@ -217,10 +213,17 @@ def generate_batched(
     decode_bufs = [b"" for _ in range(bsize)]
     stop_found = [False for _ in range(bsize)]
 
+    if display:
+        print(prompts[0], end="", flush=True)
+
     for _ in range(max_new_bytes):
         dists = bs.get_dists()
         if not allow_special:
             dists[:, 256:] = -torch.inf
+
+        # init the generator late so we know which device to put it on
+        if generator is None and seed is not None:
+            generator = torch.Generator(device=dists.device).manual_seed(seed)
 
         new_bytes = sample_from_logits(
             dists,
@@ -258,18 +261,18 @@ def generate_batched(
             for i, output in enumerate(outputs):
                 if stop_found[i]:
                     continue
+
                 suffix = "".join(output[-max(map(len, stop_strings)) :])
                 if suffix.endswith(stop_strings):
                     if not include_stop_str_in_output:
                         for stop in stop_strings:
                             if suffix.endswith(stop):
-                                # print("trim!", len(stop))
                                 outputs[i] = output[: -len(stop)]
                                 break
+
                     stop_found[i] = True
 
         if all(stop_found):
-            # print(f"stopping early after {list(map(len, outputs))} chars")
             break
 
     # print(decode_bufs)
