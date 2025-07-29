@@ -195,6 +195,7 @@ def generate_batched(
     display: bool = False,
     stop_strings: tuple[str] = (),
     include_stop_str_in_output: bool = False,
+    allow_special: bool = True,
 ):
     assert not isinstance(stop_strings, str)
     stop_strings = tuple(sorted(stop_strings, key=len, reverse=True))
@@ -218,6 +219,9 @@ def generate_batched(
 
     for _ in range(max_new_bytes):
         dists = bs.get_dists()
+        if not allow_special:
+            dists[:, 256:] = -torch.inf
+
         new_bytes = sample_from_logits(
             dists,
             do_sample=do_sample,
@@ -228,7 +232,7 @@ def generate_batched(
         ).tolist()
 
         for i, new_byte in enumerate(new_bytes):
-            if new_byte == 256:
+            if new_byte >= 256:
                 stop_found[i] = True
 
         new_bytes = [
