@@ -1,10 +1,12 @@
 import time
 from dataclasses import dataclass
 from typing import Optional, Self, Union
+import warnings
 
 import torch
 import torch.nn.functional as F
 from transformers import DynamicCache
+
 
 class RadixCacheManager:
     @dataclass
@@ -30,15 +32,20 @@ class RadixCacheManager:
             self.seq = []
             self.root = RadixCacheManager.CachedToken(None, None, -1, None, None, {}, 1)
 
-    def __init__(self, model, tokenizer):
+    def __init__(self, model, tokenizer, warn_on_resurrection=False):
         self.model = model
         self.tokenizer = tokenizer
+        self.warn_on_resurrection = warn_on_resurrection
+
+        # state
         self.cache = DynamicCache()
         self.cache_meta = None
+        self.gc_gen = 0
+
+        # metrics
         self.total_request_time = 0
         self.total_model_time = 0
         self.total_tensor_time = 0
-        self.gc_gen = 0
 
     def _make_pad_token(self, index: int, seq_cache: SequenceCache):
         return self.CachedToken(
@@ -51,65 +58,141 @@ class RadixCacheManager:
             0,  # Never save this token during GC
         )
 
+    def run_gc(self):
+        selector = [
+            [
+                i
+                for i, cached_token in enumerate(seq_cache.seq)
+                if cached_token.gc_gen == self.gc_gen
+            ]
+            for seq_cache in self.cache_meta
+        ]
+        new_cache_size = max(map(len, selector))
+        new_pad_tokens = []
+        for select in selector:
+            new_pads = new_cache_size - len(select)
+            new_pad_tokens.append(new_pads)
+            select.extend([0] * new_pads)
+
+        selector_pt = torch.tensor(
+            selector, device=self.model.device, dtype=torch.long
+        )[:, None, :, None]
+        for cache_tensor in (self.cache.key_cache, self.cache.value_cache):
+            for i, layer_tensor in enumerate(cache_tensor):
+                new_shape = list(layer_tensor.shape)
+                new_shape[2] = selector_pt.shape[2]
+                cache_tensor[i] = torch.gather(
+                    layer_tensor, 2, selector_pt.expand(new_shape)
+                )
+
+        # now update the metadata
+        for i, (cache, select) in enumerate(zip(self.cache_meta, selector)):
+            new_seq = []
+            for k, j in enumerate(select):
+                cached_token = cache.seq[j]
+                new_seq.append(cached_token)
+                cached_token.index = k
+                # note: the below code filters the children but we
+                # skip this because we want to be able to detect
+                # resurrected cache entries.
+
+                # cached_token.children = {
+                #     tid: child
+                #     for tid, child in cached_token.children.items()
+                #     if child.gc_gen == self.gc_gen
+                # }
+
+            cache.seq = new_seq
+            # set the last new_pad_tokens[i] entries to pad tokens
+            for j in range(new_cache_size - new_pad_tokens[i], new_cache_size):
+                cache.seq[j] = self._make_pad_token(j, cache)
+
+            for i, cache_tok in enumerate(cache.seq):
+                assert cache_tok.index == i
+
     def query(
         self,
         batch: list[Union[dict, tuple[list[int], dict]]],
         skip_trunk_logprobs=False,
         do_gc=False,
     ):
-        # batch is a list of trees
+        # batch is a list of trees, or (trunk, branches) tuples
         request_start = time.perf_counter()
-        bsize = len(batch)
+        batch_size = len(batch)
         self.gc_gen += 1
 
-        # initialize the cache_mapping
+        # initialize the cache_mapping from the batch_size
         if self.cache_meta is None:
             assert self.gc_gen == 1
-            self.cache_meta = [self.SequenceCache() for _ in range(bsize)]
+            self.cache_meta = [self.SequenceCache() for _ in range(batch_size)]
 
-        assert len(self.cache_meta) == bsize, "cannot change batch size"
+        assert len(self.cache_meta) == batch_size, "cannot change batch size"
+
+        # check that the cache has the expected size
+        ncached = len(self.cache_meta[0].seq)
+        assert self.cache.get_seq_length() == ncached, "cache had wrong size!"
 
         # linearize the eval trees
         all_new_tokens, all_token_backrefs = [], []
-        ncached = len(self.cache_meta[0].seq)
-        assert self.cache.get_seq_length() == ncached
         for cache, tree in zip(self.cache_meta, batch):
+            # for backwards compatibility with the no-trunk format
             if isinstance(tree, dict):
                 tree = ([], tree)
 
             trunk, branches = tree
             new_tokens = []
 
-            def linearize_tree(node, cache):
-                # print(node, cache)
+            # walk the entire tree
+            def linearize_tree(node, cache_node):
                 backref = {}
                 for tid, subtree in node.items():
                     if tid is None:
+                        # None is a request to compute logprobs
                         continue
-                    if tid in cache.children:
-                        subcache = cache.children[tid]
-                        # We touched this token so update its gc gen
+
+                    if (
+                        (subcache := cache_node.children.get(tid)) is not None
+                        and subcache.index < len(cache.seq)
+                        and cache.seq[subcache.index] is subcache
+                    ):
+                        # use the existing cached token
+                        # we touched this token so update its gc gen
                         subcache.gc_gen = self.gc_gen
+
                     else:
+                        # if all that's left is the tombstone, then maybe warn
+                        if self.warn_on_resurrection and subcache is not None:
+                            tok_seq = [subcache.tid]
+                            cache_pointer = subcache
+                            while (parent := cache_pointer.parent) is not None:
+                                tok_seq.append(parent.tid)
+                                cache_pointer = parent
+                            tok_seq = tok_seq[::-1]
+                            warnings.warn(f"Found resurrected token {subcache}: {tok_seq}")
+
+                        # add a new token to the cache
                         subcache = self.CachedToken(
                             tid,
                             ncached + len(new_tokens),
-                            cache.pos + 1,
-                            cache,
+                            cache_node.pos + 1,
+                            cache_node,
                             None,
                             {},
                             self.gc_gen,
                         )
                         new_tokens.append(subcache)
-                        cache.children[tid] = subcache
+                        cache_node.children[tid] = subcache
 
                     backref[tid] = linearize_tree(subtree, subcache)
 
-                if cache.index is not None:
-                    backref[None] = cache.index
+                # if the token is not the root, store a reference to
+                # its position so we can lookup its logprobs later
+                if cache_node.index is not None:
+                    backref[None] = cache_node.index
 
                 return backref
 
+            # replay the trunk back onto the branches
             full_tree = branches
             for tid in reversed(trunk):
                 full_tree = {tid: full_tree}
@@ -120,11 +203,13 @@ class RadixCacheManager:
         # pad the new tokens
         maxnew = max(map(len, all_new_tokens))
         if maxnew == 0:
-            print("wasted a token!")
+            warnings.warn("wasted a token!")
             maxnew = 1
         for cache, new_tokens in zip(self.cache_meta, all_new_tokens):
             while len(new_tokens) < maxnew:
-                new_tokens.append(self._make_pad_token(ncached + len(new_tokens), cache))
+                new_tokens.append(
+                    self._make_pad_token(ncached + len(new_tokens), cache)
+                )
 
         # build the tensors
         input_ids = torch.tensor(
@@ -141,7 +226,7 @@ class RadixCacheManager:
 
         attention_mask = torch.full(
             (
-                bsize,
+                batch_size,
                 1,
                 maxnew,
                 ncached + maxnew,
@@ -185,6 +270,11 @@ class RadixCacheManager:
 
         for cache, new_tokens in zip(self.cache_meta, all_new_tokens):
             cache.seq.extend(new_tokens)
+            assert len(cache.seq) == ncached + maxnew
+
+        for new_tokens in all_new_tokens:
+            for tok in new_tokens:
+                assert tok.index < ncached + maxnew
 
         # pull the logprobs back into the tree using the backrefs
         def lookup_backrefs(cache_seq, tree, backrefs, cum_logprob=0):
@@ -192,9 +282,11 @@ class RadixCacheManager:
                 # pull the trunk out as a list of logprobs if it was passed
                 (trunk, branches), bpointer, trunk_logprobs = tree, backrefs, []
                 for tid in trunk:
-                    if None in bpointer and not skip_trunk_logprobs:
+                    if (
+                        bindex := bpointer.get(None)
+                    ) is not None and not skip_trunk_logprobs:
                         # the first token has no loss
-                        trunk_logprobs.append(cache_seq[bpointer[None]].logprobs[tid])
+                        trunk_logprobs.append(cache_seq[bindex].logprobs[tid])
                     bpointer = bpointer[tid]
 
                 return trunk_logprobs, lookup_backrefs(cache_seq, branches, bpointer, 0)
@@ -202,6 +294,7 @@ class RadixCacheManager:
             result = {}
             for tid, subtree in tree.items():
                 if tid is None:
+                    # the logprobs are requested here
                     result[tid] = cache_seq[backrefs[None]].logprobs + cum_logprob
 
                 else:
@@ -209,7 +302,12 @@ class RadixCacheManager:
                         cache_seq,
                         subtree,
                         backrefs[tid],
-                        cum_logprob + (cache_seq[backrefs[None]].logprobs[tid] if None in backrefs else 0),
+                        cum_logprob
+                        + (
+                            cache_seq[bindex].logprobs[tid]
+                            if (bindex := backrefs.get(None)) is not None
+                            else 0
+                        ),
                     )
 
             return result
@@ -217,41 +315,14 @@ class RadixCacheManager:
         tensor_start = time.perf_counter()
         result = [
             lookup_backrefs(cache.seq, tree, new_token_backrefs)
-            for cache, tree, new_token_backrefs in zip(self.cache_meta, batch, all_token_backrefs)
+            for cache, tree, new_token_backrefs in zip(
+                self.cache_meta, batch, all_token_backrefs
+            )
         ]
 
         # optionally, run the copying garbage collector
         if do_gc:
-            selector = [
-                [i for i, cached_token in enumerate(seq_cache.seq) if cached_token.gc_gen == self.gc_gen]
-                for seq_cache in self.cache_meta
-            ]
-            new_cache_size = max(map(len, selector))
-            new_pad_tokens = []
-            for seq_select in selector:
-                new_pads = new_cache_size - len(seq_select)
-                new_pad_tokens.append(new_pads)
-                seq_select.extend([0] * new_pads)
-
-            selector_pt = torch.tensor(selector, device=self.model.device, dtype=torch.long)[:, None, :, None]
-            for cache in (self.cache.key_cache, self.cache.value_cache):
-                for i, layer_tensor in enumerate(cache):
-                    new_shape = list(layer_tensor.shape)
-                    new_shape[2] = selector_pt.shape[2]
-                    cache[i] = torch.gather(layer_tensor, 2, selector_pt.expand(new_shape))
-
-            # now update the metadata
-            for i, (seq_cache, seq_select) in enumerate(zip(self.cache_meta, selector)):
-                new_seq = []
-                for k, j in enumerate(seq_select):
-                    cached_token = seq_cache.seq[j]
-                    new_seq.append(cached_token)
-                    cached_token.index = k
-
-                seq_cache.seq = new_seq
-                # set the last new_pad_tokens[i] entries to pad tokens
-                for j in range(new_cache_size - new_pad_tokens[i], new_cache_size):
-                    seq_cache.seq[j] = self._make_pad_token(j, seq_cache)
+            self.run_gc()
 
         self.total_tensor_time += time.perf_counter() - tensor_start
         self.total_request_time += time.perf_counter() - request_start
