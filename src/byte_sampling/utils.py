@@ -153,42 +153,42 @@ class PriorityQueue:
         return len(self.entry_finder)
 
 
-def probs_from_logits(
+def logprobs_from_logits(
     logits: torch.Tensor,
-    do_sample: bool = True,
     temperature: float = 1,
-    top_k: float | None = None,
+    top_k: int | None = None,
     top_p: float | None = None,
     filter_value: float = -float("Inf"),
 ):
     # Adapted from https://gist.github.com/bsantraigi/5752667525d88d375207f099bd78818b
-    if not do_sample or temperature < 1e-4:
-        return torch.argmax(logits, dim=-1)
-
     logits = logits.detach().clone()
 
     if top_k is not None:
+        if top_k < 1:
+            raise ValueError("top_k must be >= 1")
         top_k = min(top_k, logits.size(-1))
         # Remove all tokens with a probability less than the last token of the top-k
         indices_to_remove = (
             logits < torch.topk(logits, top_k, dim=-1).values[..., -1, None]
         )
-        logits[indices_to_remove] = filter_value
+        logits[indices_to_remove] += filter_value
 
     if top_p is not None:
+        if not 0 <= top_p <= 1:
+            raise ValueError("top_p must be between 0 and 1")
         sorted_logits, sorted_indices = torch.sort(logits, descending=True)
         cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
         # Remove tokens with cumulative probability above the threshold
         sorted_indices_to_remove = cumulative_probs > top_p
         sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-        sorted_indices_to_remove[..., 0] = 0
-        sorted_logits[sorted_indices_to_remove] = filter_value
+        sorted_indices_to_remove[..., 0] = False
+        sorted_logits[sorted_indices_to_remove] += filter_value
         logits = torch.gather(sorted_logits, -1, sorted_indices.argsort(-1))
 
-    scaled = (logits - logits.max()) / temperature
-    probs = torch.softmax(scaled, dim=-1)
-
-    return probs
+    logits_max = logits.max(dim=-1, keepdim=True).values
+    scaled = (logits - logits_max) / temperature
+    logprobs = torch.log_softmax(scaled, dim=-1)
+    return logprobs
 
 
 def sample_from_logits(
@@ -200,16 +200,18 @@ def sample_from_logits(
     filter_value: float = -float("Inf"),
     generator: torch.Generator | None = None,
 ):
-    probs = probs_from_logits(
+    if not do_sample or temperature < 1e-4:
+        return torch.argmax(logits, dim=-1)
+
+    logprobs = logprobs_from_logits(
         logits=logits,
-        do_sample=do_sample,
         temperature=temperature,
         top_k=top_k,
         top_p=top_p,
         filter_value=filter_value,
     )
 
-    return torch.multinomial(probs, 1, generator=generator)[..., 0]
+    return torch.multinomial(torch.softmax(logprobs, dim=-1), 1, generator=generator)[..., 0]
 
 
 def scatter_logsumexp(

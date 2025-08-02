@@ -28,8 +28,10 @@ class EnsembleBytewiseSampler:
         for bs in self.bss:
             bs.add_context(prompts)
 
-    def get_dists(self):
-        logits = torch.stack([bs.get_dists() for bs in self.bss], 0).moveaxis(1, 0)
+    def get_dists(self, **kwargs):
+        logits = torch.stack([bs.get_dists(**kwargs) for bs in self.bss], 0).moveaxis(
+            1, 0
+        )
         logprobs = torch.log_softmax(logits, -1)
         if self.mode == "mix":
             return torch.log_softmax(torch.logsumexp(logprobs, 1), 1)
@@ -75,8 +77,8 @@ class BytewisePromptTemplate:
 
             self.prompt_added = True
 
-    def get_dists(self):
-        return self.bs.get_dists()
+    def get_dists(self, **kwargs):
+        return self.bs.get_dists(**kwargs)
 
 
 class BytewiseInstructFactory:
@@ -171,8 +173,10 @@ class BytewiseProxyTuning:
         for bs in self.bss:
             bs.add_context(prompts)
 
-    def get_dists(self):
-        logits = torch.stack([bs.get_dists() for bs in self.bss], 0).moveaxis(1, 0)
+    def get_dists(self, **kwargs):
+        logits = torch.stack([bs.get_dists(**kwargs) for bs in self.bss], 0).moveaxis(
+            1, 0
+        )
         logprobs = torch.log_softmax(logits, -1)
         # Do the proxy tuning!
         # print(self.alpha)
@@ -196,6 +200,7 @@ def generate_batched(
     stop_strings: tuple[str] = (),
     include_stop_str_in_output: bool = False,
     allow_special: bool = True,
+    logprob_transforms=None,
 ):
     assert not isinstance(
         stop_strings, str
@@ -217,7 +222,7 @@ def generate_batched(
         print(prompts[0], end="", flush=True)
 
     for _ in range(max_new_bytes):
-        dists = bs.get_dists()
+        dists = bs.get_dists(logprob_transforms=logprob_transforms)
         if not allow_special:
             dists[:, 256:] = -torch.inf
 

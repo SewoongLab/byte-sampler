@@ -28,7 +28,7 @@ class BaseBytewiseBatchSampler(ABC):
         pass
 
     @abstractmethod
-    def get_dists(self) -> torch.Tensor:
+    def get_dists(self, **kwargs) -> torch.Tensor:
         pass
 
 
@@ -516,7 +516,6 @@ class ByteConditioning(object):
 
             def trace_path(head):
                 pathrev = []
-                length = 0
                 while True:
                     pathrev.append(head.last_tid)
                     if head.parent is None:
@@ -879,7 +878,9 @@ class ByteConditioning(object):
                     self.trunk_lens[i] = 0
                     self.lens[i] = 0
 
-        def get_dists(self, filter_tensors=None, do_gc=None):
+        def get_dists(
+            self, *, filter_tensors=None, do_gc=None, logprob_transforms=None
+        ):
             if filter_tensors is None:
                 filter_tensors = self.filter_tensors
             if do_gc is None:
@@ -893,16 +894,17 @@ class ByteConditioning(object):
 
             # execute the token-level query
             results = self.rcm.query(
-                [*zip(self.trunks, all_branches)], skip_trunk_logprobs=True, do_gc=do_gc
+                [*zip(self.trunks, all_branches)],
+                skip_trunk_logprobs=True,
+                do_gc=do_gc,
+                logprob_transforms=logprob_transforms,
             )
 
             # aggregate the token-level probabilities into byte-level ones
             dists = []
             start = time.perf_counter()
-            for i, (branches, result) in enumerate(zip(all_branches, results)):
-                _, logprob_tree = result
-                byte_logprobs = []
-                stop_logprobs = []
+            for i, (branches, (_, logprob_tree)) in enumerate(zip(all_branches, results)):
+                byte_logprobs, stop_logprobs = [], []
 
                 # walk the tree
                 def extract_bytes(eval_tree, lp_tree, past_bytes=0):
@@ -919,11 +921,15 @@ class ByteConditioning(object):
                                     torch.logsumexp(lp_subtree[self.stop_tokens], 0)
                                 )
 
+                            # sanity check: the previous byte should be fixed by the prompt
                             # if idx > 0:
-                            #     # the previous byte should be fixed by the prompt
                             #     assert len(self.tic.get(idx - 1)[subset].unique()) == 1
+
                             selectors = self.tic.get(prompt_offset)[subset]
                             lp_subset = lp_subtree[subset]
+
+                            # 257th byte is for tokens with no byte representation
+                            # (e.g. special ones) which are handled separately
                             byte_logprobs.append(
                                 scatter_logsumexp(lp_subset, selectors, dim_size=257)
                             )

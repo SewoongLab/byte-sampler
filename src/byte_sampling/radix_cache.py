@@ -7,6 +7,8 @@ import torch
 import torch.nn.functional as F
 from transformers import DynamicCache
 
+from .utils import logprobs_from_logits
+
 
 class RadixCacheManager:
     @dataclass
@@ -115,6 +117,7 @@ class RadixCacheManager:
         batch: list[Union[dict, tuple[list[int], dict]]],
         skip_trunk_logprobs=False,
         do_gc=False,
+        logprob_transforms=None,
     ):
         # batch is a list of trees, or (trunk, branches) tuples
         request_start = time.perf_counter()
@@ -168,7 +171,9 @@ class RadixCacheManager:
                                 tok_seq.append(parent.tid)
                                 cache_pointer = parent
                             tok_seq = tok_seq[::-1]
-                            warnings.warn(f"Found resurrected token {subcache}: {tok_seq}")
+                            warnings.warn(
+                                f"Found resurrected token {subcache}: {tok_seq}"
+                            )
 
                         # add a new token to the cache
                         subcache = self.CachedToken(
@@ -276,6 +281,12 @@ class RadixCacheManager:
             for tok in new_tokens:
                 assert tok.index < ncached + maxnew
 
+        # optionally apply any transformations to the logprobs
+        def transform_logprobs(lp):
+            if logprob_transforms is not None:
+                return logprobs_from_logits(lp, **logprob_transforms)
+            return lp
+
         # pull the logprobs back into the tree using the backrefs
         def lookup_backrefs(cache_seq, tree, backrefs, cum_logprob=0):
             if not isinstance(tree, dict):
@@ -286,7 +297,9 @@ class RadixCacheManager:
                         bindex := bpointer.get(None)
                     ) is not None and not skip_trunk_logprobs:
                         # the first token has no loss
-                        trunk_logprobs.append(cache_seq[bindex].logprobs[tid])
+                        trunk_logprobs.append(
+                            transform_logprobs(cache_seq[bindex].logprobs)[tid]
+                        )
                     bpointer = bpointer[tid]
 
                 return trunk_logprobs, lookup_backrefs(cache_seq, branches, bpointer, 0)
@@ -295,7 +308,10 @@ class RadixCacheManager:
             for tid, subtree in tree.items():
                 if tid is None:
                     # the logprobs are requested here
-                    result[tid] = cache_seq[backrefs[None]].logprobs + cum_logprob
+                    result[tid] = (
+                        transform_logprobs(cache_seq[backrefs[None]].logprobs)
+                        + cum_logprob
+                    )
 
                 else:
                     result[tid] = lookup_backrefs(
@@ -304,7 +320,7 @@ class RadixCacheManager:
                         backrefs[tid],
                         cum_logprob
                         + (
-                            cache_seq[bindex].logprobs[tid]
+                            transform_logprobs(cache_seq[bindex].logprobs)[tid]
                             if (bindex := backrefs.get(None)) is not None
                             else 0
                         ),
