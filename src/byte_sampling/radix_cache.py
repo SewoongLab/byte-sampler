@@ -48,6 +48,7 @@ class RadixCacheManager:
         self.total_request_time = 0
         self.total_model_time = 0
         self.total_tensor_time = 0
+        self.uncached_tokens = 0
 
     def _make_pad_token(self, index: int, seq_cache: SequenceCache):
         return self.CachedToken(
@@ -267,6 +268,7 @@ class RadixCacheManager:
         self.cache = fwd.past_key_values
         logprobs = F.log_softmax(fwd.logits.to(torch.float32), -1)
         self.total_model_time += time.perf_counter() - model_start
+        self.uncached_tokens += input_ids.shape[-1]
 
         # roll the new tokens into the cache
         for new_tokens, lp_slice in zip(all_new_tokens, logprobs):
