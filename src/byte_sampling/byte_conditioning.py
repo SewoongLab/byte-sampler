@@ -323,26 +323,30 @@ class ByteConditioning(object):
 
         return new_merges
 
-    @classmethod
-    def _walk_vtrie(cls, vtrie):
+    def _walk_vtrie(self, vtrie, skip_unreachable=True):
         if None in vtrie:
-            yield vtrie[None]
+            tid = vtrie[None]
+            if not skip_unreachable or tid not in self.unreachable_tokens:
+                yield tid
 
         for b, subtrie in vtrie.items():
             if b is not None:
-                yield from cls._walk_vtrie(subtrie)
+                yield from self._walk_vtrie(subtrie)
 
-    def _get_walk_cached(self, prefix: bytes):
-        if prefix in self.walk_cache:
-            return self.walk_cache[prefix]
+    def _get_walk_cached(self, prefix: bytes, skip_unreachable=True):
+        cache_key = prefix, skip_unreachable
+        if cache_key in self.walk_cache:
+            return self.walk_cache[cache_key]
         pointer = self.vtrie
         for b in prefix:
             if b not in pointer:
                 return np.array([], int)
             pointer = pointer[b]
-        candidates = np.fromiter(self._walk_vtrie(pointer), int)
+        candidates = np.fromiter(
+            self._walk_vtrie(pointer, skip_unreachable=skip_unreachable), int
+        )
         if len(candidates) > self.walk_cache_min_size:
-            self.walk_cache[prefix] = candidates
+            self.walk_cache[cache_key] = candidates
         return candidates
 
     def _right_history(self, tok: int):
@@ -479,7 +483,7 @@ class ByteConditioning(object):
         def reset(self):
             self.tree = self.Node(None, None, {}, self.tcs.vtrie, [])
             self.heads = [self.tree]
-            self.last_head = self.tree
+            self.last_heads = [self.tree]
 
         def gc_node(self, node):
             if node.parent is not None and not node.children and node.trie is None:
@@ -505,11 +509,10 @@ class ByteConditioning(object):
                 new_heads.append(head)
                 if (newtid := trie.get(None)) is not None:
                     # if head.parent is None or self.tcs._valid_adj(head.last_tid, newtid):
-                    if head.parent is None or self.tcs._valid_adj(
+                    if head.last_tid is None or self.tcs._valid_adj(
                         head.last_tid, newtid
                     ):
                         newhead = self.Node(newtid, head, {}, self.tcs.vtrie, [])
-                        self.last_head = newhead
                         head.children[newhead.last_tid] = newhead
                         new_heads.append(newhead)
                         heads_created.append(newhead)
@@ -533,6 +536,7 @@ class ByteConditioning(object):
                 len(heads_created) >= 1
             ), f"sequence ending in {bytes([byte])!r} cannot be tokenized"
             self.heads = new_heads
+            self.last_heads = heads_created
 
             while len(self.tree.children) == 1:
                 if self.tree.trie is not None:
@@ -546,7 +550,18 @@ class ByteConditioning(object):
             return fixed_tokens
 
         def split(self):
-            pointer = self.last_head
+            if self.tcs.has_ignore_merges and len(self.last_heads) > 1:
+                # If there's multiple paths to the same byte, one must be through the ignored merge
+                assert len(self.last_heads) <= 2
+                unreachable_heads = [
+                    head for head in self.last_heads if head.parent.last_tid is None
+                ]
+                assert len(unreachable_heads) == 1
+                self.reset()
+                return [unreachable_heads[0].last_tid]
+
+            assert len(self.last_heads) == 1
+            pointer = next(iter(self.last_heads))
             path_rev = []
             while pointer.parent is not None:
                 path_rev.append(pointer.last_tid)
@@ -558,17 +573,17 @@ class ByteConditioning(object):
             new = self.__class__(self.tcs)
             # deepcopy the tree but NOT the trie!
             new_heads = []
-            new_last_head = None
+            new_last_heads = []
 
             def copy_tree(node: self.Node, parent: Optional[self.Node] = None):
-                nonlocal new_last_head
+                nonlocal new_last_heads
                 newnode = self.Node(
                     node.last_tid, parent, None, node.trie, copy(node.trie_path)
                 )
                 if node in self.heads:
                     new_heads.append(newnode)
-                if node is self.last_head:
-                    new_last_head = newnode
+                if node in self.last_heads:
+                    new_last_heads.append(newnode)
                 newnode.children = {
                     tid: copy_tree(child, newnode)
                     for tid, child in node.children.items()
@@ -577,7 +592,7 @@ class ByteConditioning(object):
 
             new.tree = copy_tree(self.tree)
             new.heads = new_heads
-            new.last_head = new_last_head
+            new.last_heads = new_last_heads
 
             return new
 
@@ -631,7 +646,7 @@ class ByteConditioning(object):
                             if len(converted_node[None]) == 0:
                                 converted_node.pop(None)
 
-                if node is self.last_head:
+                if node in self.last_heads:
                     if not inclusive:
                         return {}, True
                     else:
@@ -640,7 +655,7 @@ class ByteConditioning(object):
                         )
                         # converted_node[None] = slice(len(self.tcs.vocab))
 
-                return converted_node, node is self.last_head
+                return converted_node, node in self.last_heads
 
             converted_tree, _ = convert_tree(self.tree)
             return converted_tree
@@ -903,7 +918,9 @@ class ByteConditioning(object):
             # aggregate the token-level probabilities into byte-level ones
             dists = []
             start = time.perf_counter()
-            for i, (branches, (_, logprob_tree)) in enumerate(zip(all_branches, results)):
+            for i, (branches, (_, logprob_tree)) in enumerate(
+                zip(all_branches, results)
+            ):
                 byte_logprobs, stop_logprobs = [], []
 
                 # walk the tree
