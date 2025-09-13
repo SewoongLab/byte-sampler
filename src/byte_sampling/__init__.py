@@ -211,7 +211,12 @@ def generate_batched(
 
     bsize = len(prompts)
     assert not (display and bsize > 1)
-    bs = sampler_factory.get_bytewise_sampler(batch_size=bsize)
+
+    try:
+        bs = sampler_factory.get_bytewise_sampler(batch_size=bsize)
+    except AttributeError:
+        bs = sampler_factory
+
     bs.add_context([prompt.encode() for prompt in prompts])
 
     outputs = [[] for _ in range(bsize)]
