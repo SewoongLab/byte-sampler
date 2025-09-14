@@ -3,19 +3,20 @@ import heapq
 import itertools as it
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from copy import copy
 from dataclasses import dataclass
 from typing import Optional, Self, Union
 
 import numpy as np
 import regex
-import torch
 import simdjson as json
+import torch
 from ahocorasick_rs import AhoCorasick, MatchKind
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from .utils import DoublyLinkedList, bytes_to_unicode, scatter_logsumexp, build_trie
 from .radix_cache import RadixCacheManager
+from .utils import DoublyLinkedList, build_trie, bytes_to_unicode, scatter_logsumexp
 
 
 class BaseBytewiseBatchSampler(ABC):
@@ -38,7 +39,7 @@ class ByteConditioning(object):
 
         def __init__(self, tcs):
             self.tcs = tcs
-            self.device = tcs.model.device
+            self.device = tcs.model.device if tcs.model else "cpu"
             self.cache = {}
 
         def get_cache(self, idx):
@@ -222,8 +223,7 @@ class ByteConditioning(object):
                 pointer = pointer[b]
             pointer[None] = tid
 
-        if self.model:
-            self.token_index_cache = self.TokenIndexerCache(self)
+        self.token_index_cache = self.TokenIndexerCache(self)
 
     def _preprocess_merges(self, merges):
         # merge_multi_map = {}
@@ -456,15 +456,37 @@ class ByteConditioning(object):
 
         return visited
 
-    def _valid_r_filtered(self, l: int, prefix: bytes):
-        invalid = np.fromiter(self._invalid_r_filtered(l, prefix), int)
-        candidates = self._get_walk_cached(prefix)
-        return np.setdiff1d(candidates, invalid, assume_unique=True)
+    def _valid_r_filtered(self, l: int | None, prefix: bytes) -> torch.Tensor:
+        candidates = self._get_walk_cached(prefix, skip_unreachable=l is not None)
+
+        if l is None:
+            result = candidates
+        elif l in self.unreachable_tokens:
+            result = np.array([], dtype=int)
+        else:
+            invalid = np.fromiter(self._invalid_r_filtered(l, prefix), int)
+            result = np.setdiff1d(candidates, invalid, assume_unique=True)
+
+        return torch.from_numpy(result).to(device=self.device)
+
+    def _valid_r_unfiltered(self, prefix: Iterable[int]) -> torch.Tensor:
+        mask = torch.ones(
+            self.tokenizer.vocab_size,
+            dtype=torch.bool,
+            device=self.device,
+        )
+
+        for i, b in enumerate(prefix):
+            mask &= self.token_index_cache.get(i) == b
+
+        valid_tokens = torch.arange(self.tokenizer.vocab_size, device=self.device)[mask]
+
+        return valid_tokens
 
     class StreamingBPE:
         @dataclass
         class Node:
-            last_tid: int
+            last_tid: Optional[int]
             parent: Optional[Self]
             children: dict[int, Self]  # tid -> child
             trie: Optional[dict]
@@ -615,23 +637,12 @@ class ByteConditioning(object):
                 if node.trie is not None:
                     if filter_tensors:
                         # print(f"tree: {node.last_tid}, {bytes(node.trie_path) + suffix!r}")
-                        valid_tokens = torch.from_numpy(
-                            self.tcs._valid_r_filtered(
-                                node.last_tid, bytes(node.trie_path)
-                            )
-                            # self.tcs._get_walk_cached(bytes(node.trie_path)),
-                        ).to(device=self.tcs.device)
-                    else:
-                        mask = torch.ones(
-                            self.tcs.tokenizer.vocab_size,
-                            dtype=torch.bool,
-                            device=self.tcs.device,
+                        valid_tokens = self.tcs._valid_r_filtered(
+                            node.last_tid, bytes(node.trie_path)
                         )
-                        for i, b in enumerate(node.trie_path):
-                            mask &= self.tcs.token_index_cache.get(i) == b
-                        valid_tokens = torch.arange(
-                            self.tcs.tokenizer.vocab_size, device=self.tcs.device
-                        )[mask]
+                    else:
+                        valid_tokens = self.tcs._valid_r_unfiltered(node.trie_path)
+
                     if len(valid_tokens) > 0:
                         converted_node[None] = valid_tokens
 
