@@ -904,8 +904,13 @@ class ByteConditioning(object):
                     self.trunk_lens[i] = 0
                     self.lens[i] = 0
 
-        def get_dists(
-            self, *, filter_tensors=None, do_gc=None, logprob_transforms=None
+        def tree_inference(
+            self,
+            *,
+            inclusive=True,
+            filter_tensors=None,
+            do_gc=None,
+            logprob_transforms=None,
         ):
             if filter_tensors is None:
                 filter_tensors = self.filter_tensors
@@ -914,7 +919,7 @@ class ByteConditioning(object):
 
             # compute what token probabilities are needed
             all_branches = [
-                sbp.eval_tree(inclusive=True, filter_tensors=filter_tensors)
+                sbp.eval_tree(inclusive=inclusive, filter_tensors=filter_tensors)
                 for sbp in self.sbps
             ]
 
@@ -922,6 +927,18 @@ class ByteConditioning(object):
             results = self.rcm.query(
                 [*zip(self.trunks, all_branches)],
                 skip_trunk_logprobs=True,
+                do_gc=do_gc,
+                logprob_transforms=logprob_transforms,
+            )
+
+            return all_branches, results
+
+        def get_dists(
+            self, *, filter_tensors=None, do_gc=None, logprob_transforms=None
+        ):
+            all_branches, results = self.tree_inference(
+                inclusive=True,
+                filter_tensors=filter_tensors,
                 do_gc=do_gc,
                 logprob_transforms=logprob_transforms,
             )

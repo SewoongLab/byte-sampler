@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import copy
 import heapq
 import itertools
 import os
@@ -211,7 +212,59 @@ def sample_from_logits(
         filter_value=filter_value,
     )
 
-    return torch.multinomial(torch.softmax(logprobs, dim=-1), 1, generator=generator)[..., 0]
+    return torch.multinomial(torch.softmax(logprobs, dim=-1), 1, generator=generator)[
+        ..., 0
+    ]
+
+
+def sample_from_prob_tree(
+    batch_tree,
+    prob_tree,
+    do_sample: bool = True,
+    temperature: float = 1,
+    top_k: float | None = None,
+    top_p: float | None = None,
+    generator: torch.Generator | None = None,
+):
+    trunk, branches = prob_tree
+    btpointer = batch_tree
+
+    # Fast forward the batch tree to match branches
+    for tid, _ in trunk:
+        btpointer = btpointer[tid]
+
+    # Flatten the tree into a logprob tensor
+    def collect_prob_nodes(bt, pt, past=[]):
+        result = []
+        for k, v in pt.items():
+            if k is None:
+                result.append((v, bt[k], copy(past)))
+            else:
+                past.append(k)
+                result.extend(collect_prob_nodes(bt[k], v, past))
+                past.pop()
+        return result
+
+    nodes = collect_prob_nodes(btpointer, branches)
+    probs = torch.hstack([ps[tids] for ps, tids, _ in nodes]) / temperature
+    logprobs = torch.log_softmax(probs, 0)
+    idx = sample_from_logits(
+        logprobs,
+        do_sample=do_sample,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        generator=generator,
+    ).item()
+
+    # Translate the index into a context
+    result = [tid for tid, _ in trunk]
+    for ps, ids, past in nodes:
+        if idx < len(ids):
+            result.extend(past)
+            result.append(ids[idx].item())
+            return result
+        idx -= len(ids)
 
 
 def scatter_logsumexp(

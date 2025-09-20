@@ -4,7 +4,7 @@ from typing import Union
 import torch
 
 from .byte_conditioning import ByteConditioning
-from .utils import sample_from_logits
+from .utils import sample_from_logits, sample_from_prob_tree
 
 
 class EnsembleBytewiseSamplerFactory:
@@ -54,6 +54,7 @@ class BytewisePromptTemplate:
         self.batch_size = batch_size
         self.bc = bc
         self.bs = bc.get_bytewise_sampler(batch_size)
+        self.rcm = self.bs.rcm
         self.kwargs = kwargs
         self.prompt_added = False
         self.template_prefix, self.template_suffix = prefix, suffix
@@ -287,3 +288,109 @@ def generate_batched(
 
     # print(decode_bufs)
     return ["".join(output) for output in outputs]
+
+
+@torch.inference_mode()
+def generate_pbp_prepare(
+    sampler_factory,
+    prompts: list[str],
+    do_sample: bool = True,
+    temperature: float = 1,
+    top_k: float | None = None,
+    top_p: float | None = None,
+    generator: torch.Generator | None = None,
+):
+    assert not isinstance(prompts, str)
+    bsize = len(prompts)
+
+    try:
+        sampler = sampler_factory.get_bytewise_sampler(batch_size=bsize)
+    except AttributeError:
+        sampler = sampler_factory
+
+    sampler.add_context([prompt.encode() for prompt in prompts])
+
+    eval_trees, prob_trees = sampler.tree_inference(
+        inclusive=False, filter_tensors=True, do_gc=False
+    )
+
+    sampled_seqs = [
+        trunk
+        + sample_from_prob_tree(
+            et,
+            pt,
+            do_sample=do_sample,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            generator=generator,
+        )
+        for trunk, et, pt in zip(sampler.trunks, eval_trees, prob_trees)
+    ]
+
+    past_key_values = sampler.rcm.export_cache(sampled_seqs, inplace=False)
+
+    maxlen = max(map(len, sampled_seqs))
+    input_ids = torch.tensor(
+        [[sampler.bc.pad] * (maxlen - len(seq)) + seq for seq in sampled_seqs],
+        dtype=torch.long,
+        device=sampler.bc.device,
+    )
+
+    attention_mask = torch.tensor(
+        [[0] * (maxlen - len(seq)) + [1] * len(seq) for seq in sampled_seqs],
+        dtype=torch.bool,
+        device=sampler.bc.device,
+    )
+
+    return input_ids, attention_mask, past_key_values
+
+
+@torch.inference_mode()
+def generate_pbp_batched(
+    sampler_factory,
+    prompts: list[str],
+    do_sample: bool = True,
+    temperature: float = 1,
+    top_k: float | None = None,
+    top_p: float | None = None,
+    generator: torch.Generator | None = None,
+    generate_kwargs: dict | None = None,
+    max_new_tokens: int = 20,
+):
+    bsize = len(prompts)
+
+    try:
+        sampler = sampler_factory.get_bytewise_sampler(batch_size=bsize)
+    except AttributeError:
+        sampler = sampler_factory
+
+    assert do_sample or top_k is None
+    assert do_sample or top_p is None
+
+    input_ids, attention_mask, past_key_values = generate_pbp_prepare(
+        sampler_factory=sampler,
+        prompts=prompts,
+        do_sample=do_sample,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        generator=generator,
+    )
+
+    full_generate_kwargs = dict(
+        temperature=temperature,
+        do_sample=do_sample,
+        top_k=top_k,
+        top_p=top_p,
+        max_new_tokens=max_new_tokens,
+    )
+    if generate_kwargs is not None:
+        full_generate_kwargs.update(generate_kwargs)
+
+    return sampler.bc.model.generate(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        past_key_values=past_key_values,
+        **full_generate_kwargs,
+    )
