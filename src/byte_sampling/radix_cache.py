@@ -1,4 +1,5 @@
 import time
+from copy import copy
 from dataclasses import dataclass
 from typing import Optional, Self, Union
 import warnings
@@ -345,3 +346,40 @@ class RadixCacheManager:
         self.total_tensor_time += time.perf_counter() - tensor_start
         self.total_request_time += time.perf_counter() - request_start
         return result
+
+    def export_cache(self, batch: list[list[int]], inplace=True):
+        selector = []
+        for cm, seq in zip(self.cache_meta, batch):
+            sel, pointer = [], cm.root
+            for tid in seq[:-1]:
+                pointer = pointer.children[tid]
+                sel.append(pointer.pos)
+            selector.append(sel)
+
+        new_cache_size = max(map(len, selector))
+
+        new_pad_tokens = []
+        for i, select in enumerate(selector):
+            new_pads = new_cache_size - len(select)
+            new_pad_tokens.append(new_pads)
+            selector[i] = [0] * new_pads + select
+
+        selector_pt = torch.tensor(
+            selector, device=self.model.device, dtype=torch.long
+        )[:, None, :, None]
+
+        new_cache = self.cache
+        if not inplace:
+            new_cache = copy(new_cache)
+            new_cache.key_cache = copy(new_cache.key_cache)
+            new_cache.value_cache = copy(new_cache.value_cache)
+
+        for cache_tensor in (new_cache.key_cache, new_cache.value_cache):
+            for i, layer_tensor in enumerate(cache_tensor):
+                new_shape = list(layer_tensor.shape)
+                new_shape[2] = selector_pt.shape[2]
+                cache_tensor[i] = torch.gather(
+                    layer_tensor, 2, selector_pt.expand(new_shape)
+                )
+
+        return new_cache
