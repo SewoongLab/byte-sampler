@@ -484,7 +484,7 @@ class ByteConditioning(object):
         return valid_tokens
 
     class StreamingBPE:
-        @dataclass
+        @dataclass(slots=True)
         class Node:
             last_tid: Optional[int]
             parent: Optional[Self]
