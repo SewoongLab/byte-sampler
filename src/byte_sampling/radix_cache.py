@@ -92,26 +92,26 @@ class RadixCacheManager:
         for i, (cache, select) in enumerate(zip(self.cache_meta, selector)):
             new_seq = []
             for k, j in enumerate(select):
-                cached_token = cache.seq[j]
-                new_seq.append(cached_token)
-                cached_token.index = k
-                # note: the below code filters the children but we
-                # skip this because we want to be able to detect
-                # resurrected cache entries.
+                if k < new_cache_size - new_pad_tokens[i]:
+                    cached_token = cache.seq[j]
+                    new_seq.append(cached_token)
+                    cached_token.index = k
+                    # note: the below code filters the children but we
+                    # skip this because we want to be able to detect
+                    # resurrected cache entries.
 
-                # cached_token.children = {
-                #     tid: child
-                #     for tid, child in cached_token.children.items()
-                #     if child.gc_gen == self.gc_gen
-                # }
+                    # cached_token.children = {
+                    #     tid: child
+                    #     for tid, child in cached_token.children.items()
+                    #     if child.gc_gen == self.gc_gen
+                    # }
+                else:
+                    new_seq.append(self._make_pad_token(k, cache))
 
             cache.seq = new_seq
-            # set the last new_pad_tokens[i] entries to pad tokens
-            for j in range(new_cache_size - new_pad_tokens[i], new_cache_size):
-                cache.seq[j] = self._make_pad_token(j, cache)
 
-            for i, cache_tok in enumerate(cache.seq):
-                assert cache_tok.index == i
+            for j, cache_tok in enumerate(cache.seq):
+                assert cache_tok.index == j
 
     def query(
         self,
