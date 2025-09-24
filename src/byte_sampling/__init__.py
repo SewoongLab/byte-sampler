@@ -328,7 +328,7 @@ def generate_pbp_prepare(
         for trunk, et, pt in zip(sampler.trunks, eval_trees, prob_trees)
     ]
 
-    past_key_values = sampler.rcm.export_cache(sampled_seqs, inplace=False)
+    past_key_values = sampler.rcm.export_cache(sampled_seqs)
 
     maxlen = max(map(len, sampled_seqs))
     input_ids = torch.tensor(

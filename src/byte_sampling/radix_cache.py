@@ -368,18 +368,15 @@ class RadixCacheManager:
             selector, device=self.model.device, dtype=torch.long
         )[:, None, :, None]
 
-        new_cache = self.cache
-        if not inplace:
-            new_cache = copy(new_cache)
-            new_cache.key_cache = copy(new_cache.key_cache)
-            new_cache.value_cache = copy(new_cache.value_cache)
+        def select_cache(layer_tensor):
+            new_shape = list(layer_tensor.shape)
+            new_shape[2] = selector_pt.shape[2]
+            return torch.gather(layer_tensor, 2, selector_pt.expand(new_shape))
 
-        for cache_tensor in (new_cache.key_cache, new_cache.value_cache):
-            for i, layer_tensor in enumerate(cache_tensor):
-                new_shape = list(layer_tensor.shape)
-                new_shape[2] = selector_pt.shape[2]
-                cache_tensor[i] = torch.gather(
-                    layer_tensor, 2, selector_pt.expand(new_shape)
-                )
+        new_cache = DynamicCache()
+        for layer_idx, (key, value) in enumerate(
+            zip(self.cache.key_cache, self.cache.value_cache)
+        ):
+            new_cache.update(select_cache(key), select_cache(value), layer_idx)
 
         return new_cache
