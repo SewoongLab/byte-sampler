@@ -16,7 +16,11 @@ from ahocorasick_rs import AhoCorasick, MatchKind
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from .radix_cache import RadixCacheManager
-from .utils import DoublyLinkedList, build_trie, bytes_to_unicode, scatter_logsumexp
+from .streaming_added_tokens import StreamingAddedTokens
+from .streaming_bpe import StreamingBPE
+from .streaming_pretok import StreamingCharPretok
+from .utils import (DoublyLinkedList, build_trie, bytes_to_unicode,
+                    scatter_logsumexp)
 
 
 class BaseBytewiseBatchSampler(ABC):
@@ -104,10 +108,10 @@ class ByteConditioning(object):
         added_token_ids = set(tok["id"] for tok in added_tokens)
 
         added_tokens = raw_state["added_tokens"]
-        for tok in added_tokens:
-            assert not tok.get("single_word"), f"{tok}"
-            assert not tok.get("lstrip"), f"{tok}"
-            assert not tok.get("rstrip"), f"{tok}"
+        # for tok in added_tokens:
+        #     assert not tok.get("single_word"), f"{tok}"
+        #     assert not tok.get("lstrip"), f"{tok}"
+        #     assert not tok.get("rstrip"), f"{tok}"
 
         self.split_trie = AhoCorasick(
             [tok["content"] for tok in added_tokens if not tok["normalized"]],
@@ -122,8 +126,8 @@ class ByteConditioning(object):
         self.split_normalized_ids = [
             tok["id"] for tok in added_tokens if tok["normalized"]
         ]
-        if self.btok.normalizer is not None:
-            assert not self.split_normalized_ids
+        # if self.btok.normalizer is not None:
+        #     assert not self.split_normalized_ids
 
         # extract the vocabulary
         self.btu = bytes_to_unicode()
@@ -146,49 +150,6 @@ class ByteConditioning(object):
         self.has_whitespace_lookahead = False
         self.has_contraction_discontinuity = False
         self.has_ignore_merges = raw_state["model"].get("ignore_merges")
-
-        has_bytelevel = False
-        for pt in raw_state["pre_tokenizer"]["pretokenizers"]:
-            if pt["type"] == "Digits" and not pt["individual_digits"]:
-                pass
-            elif (
-                pt["type"] == "ByteLevel"
-                and not pt["add_prefix_space"]
-                and not pt["use_regex"]
-            ):
-                has_bytelevel = True
-            elif pt["type"] == "Split" and (
-                (pt["behavior"] == "Isolated" and not pt["invert"])
-                or (pt["behavior"] == "Removed" and pt["invert"])
-            ):
-                # TODO: This is not "correct"
-                regexes = pt["pattern"]["Regex"].split("|")
-                if digit3_right_just_re in regexes:
-                    self.has_digit3_right_just = True
-                    for i in range(0, 1000):
-                        assert (
-                            str(i).encode() in self.vocab
-                        ), f"Digit {i} is missing from the vocab!"
-
-                if whitespace_lookahead_re in regexes:
-                    self.has_whitespace_lookahead = True
-                    assert whitespace_newline_exception_re in regexes
-                    assert regexes.index(
-                        whitespace_newline_exception_re
-                    ) < regexes.index(whitespace_lookahead_re)
-
-                if (
-                    contraction_merge_re in regexes
-                    and contraction_bridge_re not in regexes
-                ):
-                    self.has_contraction_discontinuity = True
-            else:
-                print(f"Unknown pretokenizer {pt}")
-                # raise NotImplementedError(f"Unknown pretokenizer {pt}")
-                pass
-
-        assert not self.has_contraction_discontinuity, "Don't support this right now!"
-        assert has_bytelevel, "Tokenizer must be byte-level!"
 
         # extract the merges
         self.merges = []
@@ -483,327 +444,18 @@ class ByteConditioning(object):
 
         return valid_tokens
 
-    class StreamingBPE:
-        @dataclass(slots=True)
-        class Node:
-            last_tid: Optional[int]
-            parent: Optional[Self]
-            children: dict[int, Self]  # tid -> child
-            trie: Optional[dict]
-            trie_path: list
-
-            def __repr__(self):
-                return f"N({self.last_tid})"
-
-            __str__ = __repr__
-
-        def __init__(self, tcs: "ByteConditioning"):
-            self.tcs = tcs
-            self.reset()
-            self.total_time = 0
-
-        def reset(self):
-            self.tree = self.Node(None, None, {}, self.tcs.vtrie, [])
-            self.heads = [self.tree]
-            self.last_heads = [self.tree]
-
-        def gc_node(self, node):
-            if node.parent is not None and not node.children and node.trie is None:
-                # print(f"removing node {node}")
-                node.parent.children.pop(node.last_tid)
-                self.gc_node(node.parent)
-
-        def push(self, byte: int):
-            assert isinstance(byte, int)
-            new_heads = []
-            fixed_tokens = []
-
-            heads_created = []
-            for head in self.heads:
-                if byte not in head.trie:
-                    # this head has "died"
-                    head.trie = None
-                    self.gc_node(head)
-                    continue
-
-                trie = head.trie = head.trie[byte]
-                head.trie_path.append(byte)
-                new_heads.append(head)
-                if (newtid := trie.get(None)) is not None:
-                    # if head.parent is None or self.tcs._valid_adj(head.last_tid, newtid):
-                    if head.last_tid is None or self.tcs._valid_adj(
-                        head.last_tid, newtid
-                    ):
-                        newhead = self.Node(newtid, head, {}, self.tcs.vtrie, [])
-                        head.children[newhead.last_tid] = newhead
-                        new_heads.append(newhead)
-                        heads_created.append(newhead)
-
-            def trace_path(head):
-                pathrev = []
-                while True:
-                    pathrev.append(head.last_tid)
-                    if head.parent is None:
-                        break
-                    head = head.parent
-                return (
-                    sum(len(self.tcs.vrev.get(tid, b"")) for tid in pathrev),
-                    pathrev[::-1],
-                )
-
-            assert (
-                len(heads_created) <= 1 or self.tcs.has_ignore_merges
-            ), f"got multiple paths to the same byte: {[trace_path(h) for h in heads_created]}"
-            assert (
-                len(heads_created) >= 1
-            ), f"sequence ending in {bytes([byte])!r} cannot be tokenized"
-            self.heads = new_heads
-            self.last_heads = heads_created
-
-            while len(self.tree.children) == 1:
-                if self.tree.trie is not None:
-                    break
-
-                new_root = next(iter(self.tree.children.values()))
-                new_root.parent = None
-                self.tree = new_root
-                fixed_tokens.append(self.tree.last_tid)
-
-            return fixed_tokens
-
-        def split(self):
-            if self.tcs.has_ignore_merges and len(self.last_heads) > 1:
-                # If there's multiple paths to the same byte, one must be through the ignored merge
-                assert len(self.last_heads) <= 2
-                unreachable_heads = [
-                    head for head in self.last_heads if head.parent.last_tid is None
-                ]
-                assert len(unreachable_heads) == 1
-                self.reset()
-                return [unreachable_heads[0].last_tid]
-
-            assert len(self.last_heads) == 1
-            pointer = next(iter(self.last_heads))
-            path_rev = []
-            while pointer.parent is not None:
-                path_rev.append(pointer.last_tid)
-                pointer = pointer.parent
-            self.reset()
-            return path_rev[::-1]
-
-        def fork(self):
-            new = self.__class__(self.tcs)
-            # deepcopy the tree but NOT the trie!
-            new_heads = []
-            new_last_heads = []
-
-            def copy_tree(node: self.Node, parent: Optional[self.Node] = None):
-                nonlocal new_last_heads
-                newnode = self.Node(
-                    node.last_tid, parent, None, node.trie, copy(node.trie_path)
-                )
-                if node in self.heads:
-                    new_heads.append(newnode)
-                if node in self.last_heads:
-                    new_last_heads.append(newnode)
-                newnode.children = {
-                    tid: copy_tree(child, newnode)
-                    for tid, child in node.children.items()
-                }
-                return newnode
-
-            new.tree = copy_tree(self.tree)
-            new.heads = new_heads
-            new.last_heads = new_last_heads
-
-            return new
-
-        def eval_tree(self, suffix=b"", inclusive=False, filter_tensors=True):
-            if suffix:
-                # for convenience
-                self_copy = self.fork()
-                copy_tokens = []
-                for b in suffix:
-                    copy_tokens.extend(self_copy.push(b))
-                tree = self_copy.eval_tree(
-                    inclusive=inclusive, filter_tensors=filter_tensors
-                )
-                for tid in reversed(copy_tokens):
-                    tree = {tid: tree}
-                return tree
-
-            def convert_tree(node: self.Node):
-                converted_node = {}
-                if node.trie is not None:
-                    if filter_tensors:
-                        # print(f"tree: {node.last_tid}, {bytes(node.trie_path) + suffix!r}")
-                        valid_tokens = self.tcs._valid_r_filtered(
-                            node.last_tid, bytes(node.trie_path)
-                        )
-                    else:
-                        valid_tokens = self.tcs._valid_r_unfiltered(node.trie_path)
-
-                    if len(valid_tokens) > 0:
-                        converted_node[None] = valid_tokens
-
-                for tid, child in node.children.items():
-                    subtree, was_last = convert_tree(child)
-                    if subtree:
-                        converted_node[tid] = subtree
-                        if (
-                            valid_tokens := converted_node.get(None)
-                        ) is not None and was_last:
-                            converted_node[None] = valid_tokens[valid_tokens != tid]
-                            if len(converted_node[None]) == 0:
-                                converted_node.pop(None)
-
-                if node in self.last_heads:
-                    if not inclusive:
-                        return {}, True
-                    else:
-                        converted_node[None] = torch.arange(
-                            self.tcs.tokenizer.vocab_size, device=self.tcs.device
-                        )
-                        # converted_node[None] = slice(len(self.tcs.vocab))
-
-                return converted_node, node in self.last_heads
-
-            converted_tree, _ = convert_tree(self.tree)
-            return converted_tree
-
     def get_streaming_bpe(self):
-        return self.StreamingBPE(self)
-
-    class StreamingCharPretok:
-        def __init__(self, tcs: "ByteConditioning"):
-            self.tcs = tcs
-            self.sbpe = tcs.get_streaming_bpe()
-            self.previous_sbpe = None
-            self.held_tokens = None
-            self.previous_held_tokens = None
-            self.pretokenize = (
-                tcs.tokenizer.backend_tokenizer.pre_tokenizer.pre_tokenize_str
-            )
-            self.buf = ""
-
-        def push(self, char: str):
-            if self.tcs.btok.normalizer is not None:
-                char = self.tcs.btok.normalizer.normalize_str(char)
-            self.buf += char
-            pretokens = self.pretokenize(self.buf)
-            fixed_tokens = []
-
-            for (_, (_, aend)), (_, (bstart, _)) in it.pairwise(pretokens):
-                assert aend == bstart, f"got gap in pretokens: {pretokens}"
-
-            assert pretokens[0][1][1] >= len(self.buf) - 2, f"{pretokens}"
-            if pretokens[0][1][1] == len(self.buf) - 2:
-                # the special case
-                assert self.previous_sbpe is not None, f"{pretokens}"
-                self.held_tokens = None
-
-                self.sbpe = self.previous_sbpe
-                fixed_tokens.extend(self.previous_held_tokens)
-                self.buf = self.buf[-2:]
-
-                if len(pretokens) == 3:
-                    fixed_tokens.extend(self.sbpe.split())
-                    self.buf = self.buf[-1]
-
-            else:
-                # the normal case
-                if self.held_tokens is not None:
-                    fixed_tokens.extend(self.held_tokens)
-
-                if pretokens[0][1][1] == len(self.buf) - 1:
-                    fixed_tokens.extend(self.sbpe.split())
-                    self.buf = self.buf[-1]
-
-            # no matter what, these are no longer valid
-            self.previous_sbpe = None
-            self.held_tokens = None
-            self.previous_held_tokens = None
-
-            if self.tcs.has_whitespace_lookahead and regex.search(
-                r"\s[^\S\r\n]$", self.buf
-            ):
-                # TODO: double check this regex
-                self.previous_sbpe = self.sbpe
-                self.sbpe = self.sbpe.fork()
-                self.held_tokens = []
-                self.previous_held_tokens = []
-                self.previous_held_tokens.extend(self.previous_sbpe.split())
-                for b in char.encode():
-                    self.held_tokens.extend(self.sbpe.push(b))
-                    self.previous_held_tokens.extend(self.previous_sbpe.push(b))
-
-                while (
-                    self.held_tokens
-                    and self.previous_held_tokens
-                    and self.held_tokens[0] == self.previous_held_tokens[0]
-                ):
-                    # don't hit this often enough to switch to deque
-                    fixed_tokens.append(self.held_tokens.pop(0))
-                    self.previous_held_tokens.pop(0)
-            else:
-                for b in char.encode():
-                    fixed_tokens.extend(self.sbpe.push(b))
-
-            return fixed_tokens
-
-        def split(self):
-            self.buf = ""
-            self.previous_sbpe = None
-            self.held_tokens = None
-            self.previous_held_tokens = None
-            return self.sbpe.split()
-
-        def eval_tree(self, suffix=b"", inclusive=False, filter_tensors=True):
-            current_tree = self.sbpe.eval_tree(
-                suffix=suffix, inclusive=inclusive, filter_tensors=filter_tensors
-            )
-            if self.previous_sbpe is None:
-                assert self.held_tokens is None
-                return current_tree
-
-            for tid in reversed(self.held_tokens):
-                current_tree = {tid: current_tree}
-
-            previous_tree = self.previous_sbpe.eval_tree(
-                suffix=suffix, inclusive=inclusive, filter_tensors=filter_tensors
-            )
-            for tid in reversed(self.previous_held_tokens):
-                previous_tree = {tid: previous_tree}
-
-            def merge_trees(n1, n2):
-                merged = copy(n1)
-                for tid, subtree in n2.items():
-                    if tid in merged:
-                        if tid is None:
-                            # this is the only way we can have multiple valid paths to the same byte
-                            assert self.previous_sbpe is not None
-                            merged[tid] = torch.cat((merged[tid], subtree)).unique()
-                            # merged[tid] = torch.from_numpy(
-                            #     np.union1d(merged[tid], subtree)
-                            # )
-                        else:
-                            merged[tid] = merge_trees(merged[tid], subtree)
-                    else:
-                        merged[tid] = subtree
-
-                return merged
-
-            return merge_trees(current_tree, previous_tree)
+        return StreamingBPE(self)
 
     def get_streaming_char_pretok(self):
-        assert (
-            not self.has_digit3_right_just
-        ), "Cannot support streaming with right aligned digit groups!"
-        return self.StreamingCharPretok(self)
+        return StreamingCharPretok(self)
 
-    class StreamingBytePretok:
+    def get_streaming_added_tokens(self):
+        return StreamingAddedTokens(self)
+
+    class StreamingByteTree:
         def __init__(self, tcs: "ByteConditioning"):
-            self.scp = tcs.get_streaming_char_pretok()
+            self.scp = tcs.get_streaming_added_tokens()
             self.buf = []
 
         def push(self, byte):
@@ -827,16 +479,16 @@ class ByteConditioning(object):
                 filter_tensors=filter_tensors,
             )
 
-    def get_streaming_byte_pretok(self):
-        return self.StreamingBytePretok(self)
+    def get_streaming_byte_tree(self):
+        return self.StreamingByteTree(self)
 
     def streaming_bpe_open(
         self, text: Union[str, bytes], inclusive=False, suffix=b"", filter_tensors=True
     ):
         if isinstance(text, str):
-            S = self.get_streaming_char_pretok()
-        else:
-            S = self.get_streaming_byte_pretok()
+            text = text.encode()
+
+        S = self.get_streaming_byte_tree()
 
         trunk = []
         for atom in text:
@@ -860,7 +512,7 @@ class ByteConditioning(object):
             )
             self.tic = bc.token_index_cache
             self.batch_size = batch_size
-            self.sbps = [bc.get_streaming_byte_pretok() for _ in range(batch_size)]
+            self.sbps = [bc.get_streaming_byte_tree() for _ in range(batch_size)]
             self.trunks = [[self.bc.bos] for _ in range(batch_size)]
             self.lens = [0 for _ in range(batch_size)]
             self.trunk_lens = [0 for _ in range(batch_size)]

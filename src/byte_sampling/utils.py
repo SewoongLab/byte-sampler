@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from copy import copy
 import heapq
 import itertools
 import os
+from copy import copy
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Any, Self
-import torch
+from typing import Any, Dict, List, Optional, Self, Tuple
 
+import torch
 import torch.nn.functional as F
 
 
@@ -333,3 +333,150 @@ class DoublyLinkedList:
         return f"<{str(items)[1:-1]}>"
 
     __repr__ = __str__
+
+
+class RingDeque:
+    """Deque via circular buffer:
+    - Amortized O(1) append/appendleft/pop/popleft
+    - __getitem__(int) in O(1); __getitem__(slice) → generator over the slice
+    - Capacity doubles when full
+    """
+
+    __slots__ = ("_data", "_head", "_tail", "_size")
+
+    def __init__(self, iterable=None, initial_capacity=8):
+        cap = 1
+        base = max(1, int(initial_capacity))
+        while cap < base:
+            cap <<= 1
+        self._data = [None] * cap
+        self._head = 0  # index of logical element 0
+        self._tail = 0  # one past the last element
+        self._size = 0
+        if iterable:
+            for x in iterable:
+                self.append(x)
+
+    # ---------- helpers ----------
+    def _phys_index(self, i):
+        """Map logical index i (0..size-1, accepts negative) to physical slot."""
+        n = self._size
+        if not -n <= i < n:
+            raise IndexError("deque index out of range")
+        if i < 0:
+            i += n
+        cap = len(self._data)
+        return (self._head + i) & (cap - 1)
+
+    def _ensure_capacity(self, needed):
+        if needed <= len(self._data):
+            return
+        old_cap = len(self._data)
+        new_cap = old_cap * 2 if old_cap else 8
+        while new_cap < needed:
+            new_cap *= 2
+        new_data = [None] * new_cap
+
+        # Copy existing elements in logical order into new_data[0:size]
+        if self._size:
+            if self._head < self._tail:
+                new_data[0 : self._size] = self._data[self._head : self._tail]
+            else:
+                left = old_cap - self._head
+                new_data[0:left] = self._data[self._head :]
+                new_data[left : left + self._tail] = self._data[: self._tail]
+
+        self._data = new_data
+        self._head = 0
+        self._tail = self._size  # one past last
+
+    # ---------- core API ----------
+    def append(self, value):
+        self._ensure_capacity(self._size + 1)
+        cap = len(self._data)
+        mask = cap - 1
+        self._data[self._tail] = value
+        self._tail = (self._tail + 1) & mask
+        self._size += 1
+
+    def appendleft(self, value):
+        self._ensure_capacity(self._size + 1)
+        cap = len(self._data)
+        mask = cap - 1
+        self._head = (self._head - 1) & mask
+        self._data[self._head] = value
+        self._size += 1
+
+    def pop(self):
+        if not self._size:
+            raise IndexError("pop from an empty deque")
+        cap = len(self._data)
+        mask = cap - 1
+        self._tail = (self._tail - 1) & mask
+        val = self._data[self._tail]
+        self._data[self._tail] = None
+        self._size -= 1
+        return val
+
+    def popleft(self):
+        if not self._size:
+            raise IndexError("popleft from an empty deque")
+        cap = len(self._data)
+        mask = cap - 1
+        val = self._data[self._head]
+        self._data[self._head] = None
+        self._head = (self._head + 1) & mask
+        self._size -= 1
+        return val
+
+    # ---------- peeks ----------
+    def peek(self):
+        """Right-end (tail-1) element without removing it."""
+        if not self._size:
+            raise IndexError("peek from an empty deque")
+        cap = len(self._data)
+        mask = cap - 1
+        return self._data[(self._tail - 1) & mask]
+
+    def peekleft(self):
+        """Left-end (head) element without removing it."""
+        if not self._size:
+            raise IndexError("peekleft from an empty deque")
+        return self._data[self._head]
+
+    # ---------- Python protocol ----------
+    def __len__(self):
+        return self._size
+
+    def __iter__(self):
+        cap = len(self._data)
+        mask = cap - 1
+        for i in range(self._size):
+            yield self._data[(self._head + i) & mask]
+
+    def __repr__(self):
+        return f"RingDeque([{', '.join(repr(x) for x in self)}])"
+
+    def __getitem__(self, key):
+        if isinstance(key, slice):
+            start, stop, step = key.indices(self._size)
+            if step == 0:
+                raise ValueError("slice step cannot be zero")
+            # Capture current storage to keep iteration stable.
+            data = self._data
+            head = self._head
+            cap = len(data)
+            mask = cap - 1
+
+            def _gen(s=start, e=stop, st=step, d=data, h=head, m=mask):
+                for i in range(s, e, st):
+                    yield d[(h + i) & m]
+
+            return _gen()
+        else:
+            return self._data[self._phys_index(key)]
+
+    def __setitem__(self, key, value):
+        if isinstance(key, slice):
+            raise TypeError("slice assignment not supported")
+        self._data[self._phys_index(key)] = value

@@ -1,8 +1,8 @@
 import time
+import warnings
 from copy import copy
 from dataclasses import dataclass
 from typing import Optional, Self, Union
-import warnings
 
 import torch
 import torch.nn.functional as F
@@ -347,7 +347,7 @@ class RadixCacheManager:
         self.total_request_time += time.perf_counter() - request_start
         return result
 
-    def export_cache(self, batch: list[list[int]], inplace=True):
+    def export_cache(self, batch: list[list[int]]):
         selector = []
         for cm, seq in zip(self.cache_meta, batch):
             sel, pointer = [], cm.root
