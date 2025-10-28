@@ -300,18 +300,29 @@ class StreamingAddedTokens:
             scp, r = match.scp, match.r
 
             # Need to "fast forward" the state to reflect the rest of the
-            # prefix. This is still an overapproximation, since some of
-            # these may violate the lefmost-longest match semantics
-            updated_state = match.state
-            for b in self.buf[r - self.buf_idx :]:
-                new_state = updated_state.transitions[b]
-                # We know we'll never take a shortcut transition
-                assert new_state.depth > updated_state.depth
-                updated_state = new_state
+            # prefix + suffix. This is still an overapproximation, since
+            # some of these may violate the lefmost-longest match semantics
+            replay_state = match.state
+            # for b in it.chain(self.buf[r - self.buf_idx :], suffix):
+            #     new_state = replay_state.transitions[b]
+            #     # We know we'll never take a shortcut transition
+            #     assert new_state.depth > replay_state.depth
+            #     replay_state = new_state
 
-            pointer[None] = torch.tensor(
-                [tid for tid in self._walk_state(updated_state) if tid != match.tid]
-            )
+            for b in it.chain(self.buf[r - self.buf_idx :], suffix):
+                # If there's no outbound transition, then there's no matches here
+                if (new_state := replay_state.transitions.get(b)) is None:
+                    break
+
+                # If we take a shortcut, then there's no matches here
+                if new_state.depth <= replay_state.depth:
+                    break
+
+                replay_state = new_state
+            else:
+                pointer[None] = torch.tensor(
+                    [tid for tid in self._walk_state(replay_state) if tid != match.tid]
+                )
 
             for tid in it.chain(match.outbuf, (match.tid,)):
                 last_pointer, pointer = pointer, pointer.setdefault(tid, {})
@@ -347,8 +358,22 @@ class StreamingAddedTokens:
                 split_pointer = split_pointer.setdefault(tid, {})
 
             assert None not in split_pointer, f"{split_pointer}"
-            split_pointer[None] = torch.tensor(list(self._walk_state(state)))
-            # print(f"{split_pointer=}")
+            # Need to "fast forward" the state to reflect the rest of the
+            # suffix. This is still an overapproximation, since
+            # some of these may violate the lefmost-longest match semantics
+            suffix_state = state
+            for b in suffix:
+                # If there's no outbound transition, then there's no matches here
+                if (new_state := suffix_state.transitions.get(b)) is None:
+                    break
+
+                # If we take a shortcut, then there's no matches here
+                if new_state.depth <= suffix_state.depth:
+                    break
+
+                suffix_state = new_state
+            else:
+                split_pointer[None] = torch.tensor(list(self._walk_state(suffix_state)))
 
             state = state.longest_strict_suffix
 
