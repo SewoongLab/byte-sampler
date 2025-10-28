@@ -395,20 +395,6 @@ class StreamingCharPretok:
         if not self.branches:
             return get_tree(self.state)
 
-        def merge_trees(n1, n2):
-            merged = n1
-            for tid, subtree in n2.items():
-                if tid in merged:
-                    if tid is None:
-                        # pure torch to avoid a device sync
-                        merged[tid] = torch.cat((merged[tid], subtree)).unique()
-                    else:
-                        merged[tid] = merge_trees(merged[tid], subtree)
-                else:
-                    merged[tid] = subtree
-
-            return merged
-
         result = None
         for branch_state in self.branches.values():
             subtree = get_tree(branch_state)
@@ -418,6 +404,6 @@ class StreamingCharPretok:
             if result is None:
                 result = subtree
             else:
-                result = merge_trees(result, subtree)
+                result = StreamingBPE.tree_update(result, subtree)
 
         return result

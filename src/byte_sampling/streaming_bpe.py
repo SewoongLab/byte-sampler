@@ -40,6 +40,7 @@ class StreamingBPE:
         new_heads = []
         fixed_tokens = []
 
+        # The core streaming update
         heads_created = []
         for head in self.heads:
             if byte not in head.trie:
@@ -59,6 +60,7 @@ class StreamingBPE:
                     new_heads.append(newhead)
                     heads_created.append(newhead)
 
+        # Some quick sanity checks
         def trace_path(head):
             pathrev = []
             while True:
@@ -77,9 +79,11 @@ class StreamingBPE:
         assert (
             len(heads_created) >= 1
         ), f"sequence ending in {bytes([byte])!r} cannot be tokenized"
+
         self.heads = new_heads
         self.last_heads = heads_created
 
+        # Pull off any root node with unambiguous children
         while len(self.tree.children) == 1:
             if self.tree.trie is not None:
                 break
@@ -137,19 +141,44 @@ class StreamingBPE:
 
         return new
 
+    @classmethod
+    def tree_update(cls, tree1, tree2):
+        "Merge tree2 into tree1. Mutates tree1."
+        merged = tree1
+        for tid, subtree in tree2.items():
+            if tid in merged:
+                if tid is None:
+                    # pure torch to avoid a device sync
+                    merged[tid] = torch.cat((merged[tid], subtree)).unique()
+                else:
+                    merged[tid] = cls.tree_update(merged[tid], subtree)
+            else:
+                merged[tid] = subtree
+
+        return merged
+
     def eval_tree(self, suffix=b"", inclusive=False, filter_tensors=True):
         if suffix:
-            # for convenience
-            self_copy = self.fork()
-            copy_tokens = []
-            for b in suffix:
-                copy_tokens.extend(self_copy.push(b))
-            tree = self_copy.eval_tree(
-                inclusive=inclusive, filter_tensors=filter_tensors
-            )
-            for tid in reversed(copy_tokens):
-                tree = {tid: tree}
-            return tree
+            # Suffix may be (at most) a partial character this means that
+            # we can't trust StreamingCharPretok to predict whether there
+            # is a split at the beginning of the suffix. Thus, we handle
+            # both cases here.
+            def build_tree_from_suffix(sbpe, split):
+                outbuf = []
+                if split:
+                    outbuf.extend(sbpe.split())
+                for b in suffix:
+                    outbuf.extend(sbpe.push(b))
+                tree = sbpe.eval_tree(
+                    inclusive=inclusive, filter_tensors=filter_tensors
+                )
+                for tid in reversed(outbuf):
+                    tree = {tid: tree}
+                return tree
+
+            unsplit_tree = build_tree_from_suffix(self.fork(), False)
+            split_tree = build_tree_from_suffix(self.fork(), True)
+            return self.tree_update(unsplit_tree, split_tree)
 
         def convert_tree(node: self.Node):
             converted_node = {}

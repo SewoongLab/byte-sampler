@@ -455,7 +455,7 @@ class ByteConditioning(object):
 
     class StreamingByteTree:
         def __init__(self, tcs: "ByteConditioning"):
-            self.scp = tcs.get_streaming_added_tokens()
+            self.sat = tcs.get_streaming_added_tokens()
             self.buf = []
 
         def push(self, byte):
@@ -463,17 +463,17 @@ class ByteConditioning(object):
             try:
                 char = bytes(self.buf).decode()
                 self.buf = []
-                return self.scp.push(char)
+                return self.sat.push(char)
 
             except UnicodeDecodeError:
                 return []
 
         def split(self):
             assert not self.buf
-            return self.scp.split()
+            return self.sat.split()
 
         def eval_tree(self, inclusive=False, suffix=b"", filter_tensors=True):
-            return self.scp.eval_tree(
+            return self.sat.eval_tree(
                 suffix=bytes(self.buf) + suffix,
                 inclusive=inclusive,
                 filter_tensors=filter_tensors,
