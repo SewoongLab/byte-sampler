@@ -63,7 +63,11 @@ class ByteConditioning(object):
                     return bytes(p)
             return None
 
-        def query(self, prefix: bytes) -> torch.Tensor:
+        def query(self, prefix: bytes, strict: bool = False) -> torch.Tensor:
+            """
+            Return a tensor containing all tids that start with prefix.
+            If strict is True, exclude tokens that match the prefix exactly.
+            """
             lo = bisect.bisect_left(self.vocab_sorted, prefix)
             upper = self._next_prefix(prefix)
             hi = (
@@ -71,6 +75,14 @@ class ByteConditioning(object):
                 if upper is None
                 else bisect.bisect_left(self.vocab_sorted, upper)
             )
+
+            if strict and lo < hi:
+                # Check if the prefix itself exists in the range
+                # If it does, exclude it by starting from the next position
+                if lo < len(self.vocab_sorted) and self.vocab_sorted[lo] == prefix:
+                    # The exact match is at position `lo`, so exclude it
+                    lo = lo + 1
+
             return self.tids_sorted[lo:hi]
 
         def all(self):
@@ -482,8 +494,10 @@ class ByteConditioning(object):
 
         return torch.from_numpy(result).to(device=self.device)
 
-    def _valid_r_unfiltered(self, prefix: Iterable[int]) -> torch.Tensor:
-        return self.token_slicer.query(prefix)
+    def _valid_r_unfiltered(
+        self, prefix: Iterable[int], inclusive: bool = False
+    ) -> torch.Tensor:
+        return self.token_slicer.query(prefix, strict=not inclusive)
 
     def get_streaming_bpe(self):
         return StreamingBPE(self)
