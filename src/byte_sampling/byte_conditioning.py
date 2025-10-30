@@ -3,6 +3,7 @@ import heapq
 import itertools as it
 import time
 from abc import ABC, abstractmethod
+from collections import ChainMap
 from collections.abc import Iterable
 from copy import copy
 from dataclasses import dataclass
@@ -38,6 +39,43 @@ class BaseBytewiseBatchSampler(ABC):
 
 
 class ByteConditioning(object):
+    class TokenSlicer:
+        """Class to quickly compute all tokens starting with a prefix"""
+
+        def __init__(self, vrev: dict[int, bytes], device=None):
+            vrev_sorted = sorted(vrev.items(), key=lambda tid_tok: tid_tok[1])
+            self.vocab_sorted = [tok for _, tok in vrev_sorted]
+            self.tids_sorted = torch.tensor(
+                [tid for tid, _ in vrev_sorted], device=device
+            )
+
+        @classmethod
+        def _next_prefix(cls, prefix: bytes) -> bytes | None:
+            """
+            Smallest byte string strictly greater than all strings starting with `prefix`.
+            If no such string exists (prefix is all 0xFF), return None to mean unbounded upper.
+            """
+            p = bytearray(prefix)
+            for i in range(len(p) - 1, -1, -1):
+                if p[i] != 0xFF:
+                    p[i] += 1
+                    del p[i + 1 :]  # truncate
+                    return bytes(p)
+            return None
+
+        def query(self, prefix: bytes) -> torch.Tensor:
+            lo = bisect.bisect_left(self.vocab_sorted, prefix)
+            upper = self._next_prefix(prefix)
+            hi = (
+                len(self.vocab_sorted)
+                if upper is None
+                else bisect.bisect_left(self.vocab_sorted, upper)
+            )
+            return self.tids_sorted[lo:hi]
+
+        def all(self):
+            return self.tids_sorted
+
     class TokenIndexerCache:
         """Class to cache the arrays of nth bytes of each token"""
 
@@ -99,6 +137,7 @@ class ByteConditioning(object):
         self.bos = self.tokenizer.bos_token_id or self.tokenizer.eos_token_id
         self.eos = self.tokenizer.eos_token_id or self.tokenizer.bos_token_id
         self.pad = self.tokenizer.pad_token_id or self.bos
+        self.vsize = self.tokenizer.vocab_size
 
         # this is awful...
         raw_state = json.loads(self.tokenizer.backend_tokenizer.__getstate__())
@@ -184,6 +223,19 @@ class ByteConditioning(object):
                 pointer = pointer[b]
             pointer[None] = tid
 
+        self.token_slicer = self.TokenSlicer(
+            ChainMap(
+                self.vrev,
+                {
+                    tid: at.content.encode("utf-8")
+                    for tid, at in self.tokenizer.added_tokens_decoder.items()
+                    # Don't add special tokens here. They're handled at the
+                    # StreamingAddedToken layer.
+                    if not at.special
+                },
+            ),
+            self.device,
+        )
         self.token_index_cache = self.TokenIndexerCache(self)
 
     def _preprocess_merges(self, merges):
@@ -431,18 +483,7 @@ class ByteConditioning(object):
         return torch.from_numpy(result).to(device=self.device)
 
     def _valid_r_unfiltered(self, prefix: Iterable[int]) -> torch.Tensor:
-        mask = torch.ones(
-            self.tokenizer.vocab_size,
-            dtype=torch.bool,
-            device=self.device,
-        )
-
-        for i, b in enumerate(prefix):
-            mask &= self.token_index_cache.get(i) == b
-
-        valid_tokens = torch.arange(self.tokenizer.vocab_size, device=self.device)[mask]
-
-        return valid_tokens
+        return self.token_slicer.query(prefix)
 
     def get_streaming_bpe(self):
         return StreamingBPE(self)

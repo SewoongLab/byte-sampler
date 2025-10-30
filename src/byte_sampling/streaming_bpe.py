@@ -183,15 +183,14 @@ class StreamingBPE:
         def convert_tree(node: self.Node):
             converted_node = {}
             if node.trie is not None:
+                prefix = bytes(node.trie_path)
                 if filter_tensors:
                     # print(f"tree: {node.last_tid}, {bytes(node.trie_path) + suffix!r}")
-                    valid_tokens = self.tcs._valid_r_filtered(
-                        node.last_tid, bytes(node.trie_path)
-                    )
+                    valid_tokens = self.tcs._valid_r_filtered(node.last_tid, prefix)
                 else:
-                    valid_tokens = self.tcs._valid_r_unfiltered(node.trie_path)
+                    valid_tokens = self.tcs._valid_r_unfiltered(prefix)
 
-                if len(valid_tokens) > 0:
+                if valid_tokens.numel():
                     converted_node[None] = valid_tokens
 
             for tid, child in node.children.items():
@@ -199,8 +198,9 @@ class StreamingBPE:
                 if subtree:
                     converted_node[tid] = subtree
                     if (
-                        valid_tokens := converted_node.get(None)
-                    ) is not None and was_last:
+                        was_last
+                        and (valid_tokens := converted_node.get(None)) is not None
+                    ):
                         converted_node[None] = valid_tokens[valid_tokens != tid]
                         if len(converted_node[None]) == 0:
                             converted_node.pop(None)
@@ -209,9 +209,7 @@ class StreamingBPE:
                 if not inclusive:
                     return {}, True
                 else:
-                    converted_node[None] = torch.arange(
-                        self.tcs.tokenizer.vocab_size, device=self.tcs.device
-                    )
+                    converted_node[None] = self.tcs.token_slicer.all()
                     # converted_node[None] = slice(len(self.tcs.vocab))
 
             return converted_node, node in self.last_heads
