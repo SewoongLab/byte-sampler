@@ -344,9 +344,10 @@ class StreamingAddedTokens:
                 outbuf.extend(scp.push(c))
             r = root_idx
 
-            split_pointer = pointer
+            # Advance the pointer to reflect the outbuf
             for tid in outbuf:
                 last_pointer, pointer = pointer, pointer.setdefault(tid, {})
+            split_pointer = pointer
 
             # Add the special tokens that potentially match from here
             if state is self._zero_state:
