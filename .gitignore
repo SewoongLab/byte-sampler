@@ -8,3 +8,10 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Jupyter
+.virtual_documents
+.ipynb_checkpoints
+
+# Tokenizers (for tests)
+/tokenizers
