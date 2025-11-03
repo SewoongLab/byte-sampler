@@ -296,13 +296,13 @@ class StreamingAddedTokens:
         scp, r = self.base_scp, self.base_idx
 
         # Advance the state according to the chain
-        for match in self.chain:
-            scp, r = match.scp, match.r
+        for chain_match in self.chain:
+            scp, r = chain_match.scp, chain_match.r
 
             # Need to "fast forward" the state to reflect the rest of the
             # prefix + suffix. This is still an overapproximation, since
             # some of these may violate the lefmost-longest match semantics
-            replay_state = match.state
+            replay_state = chain_match.state
             # for b in it.chain(self.buf[r - self.buf_idx :], suffix):
             #     new_state = replay_state.transitions[b]
             #     # We know we'll never take a shortcut transition
@@ -321,15 +321,19 @@ class StreamingAddedTokens:
                 replay_state = new_state
             else:
                 pointer[None] = torch.tensor(
-                    [tid for tid in self._walk_state(replay_state) if tid != match.tid]
+                    [
+                        tid
+                        for tid in self._walk_state(replay_state)
+                        if tid != chain_match.tid
+                    ]
                 )
 
-            for tid in it.chain(match.outbuf, (match.tid,)):
+            for tid in it.chain(chain_match.outbuf, (chain_match.tid,)):
                 last_pointer, pointer = pointer, pointer.setdefault(tid, {})
 
         # Handle future partial matches
         state = self.state
-        scp = scp.fork()  # should already be split
+        forked = False
         while True:
             outbuf = []
             root_idx = self.idx - state.depth
@@ -341,6 +345,10 @@ class StreamingAddedTokens:
 
             # Fast forward scp to root_idx
             for c in self.buf[r - self.buf_idx : root_idx - self.buf_idx]:
+                # Fork lazily only if we need to push
+                if not forked:
+                    scp = scp.fork()  # should already be split
+                    forked = True
                 outbuf.extend(scp.push(c))
             r = root_idx
 
