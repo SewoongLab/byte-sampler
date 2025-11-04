@@ -284,8 +284,8 @@ def scatter_logsumexp(
     if dim_size is None:
         dim_size = int(index.max()) + 1
     # 1. per-bucket max for numerical stability
-    m = torch.full((dim_size,), -torch.inf, device=src.device)
-    m.scatter_reduce_(0, index, src, reduce="amax", include_self=False)
+    m = src.new_full((dim_size,), -torch.inf)
+    m.scatter_reduce_(0, index, src.detach(), reduce="amax", include_self=False)
     # handle the all-(-inf) case
     m = torch.nan_to_num(m, nan=None, neginf=0, out=None if m.requires_grad else m)
     # 2. exponentiate shifted values and sum per bucket
