@@ -325,7 +325,8 @@ class StreamingAddedTokens:
                         tid
                         for tid in self._walk_state(replay_state)
                         if tid != chain_match.tid
-                    ]
+                    ],
+                    device=self.tcs.device,
                 )
 
             for tid in it.chain(chain_match.outbuf, (chain_match.tid,)):
@@ -382,7 +383,9 @@ class StreamingAddedTokens:
 
                 suffix_state = new_state
             else:
-                split_pointer[None] = torch.tensor(list(self._walk_state(suffix_state)))
+                split_pointer[None] = torch.tensor(
+                    list(self._walk_state(suffix_state)), device=self.tcs.device
+                )
 
             state = state.longest_strict_suffix
 
@@ -398,9 +401,12 @@ class StreamingAddedTokens:
             # check carefully: tid has not been overwritten
             last_pointer.pop(tid)
             last_pointer[None] = torch.tensor(
-                ([tid] + tids.tolist())
-                if (tids := last_pointer.get(None)) is not None
-                else [tid]
+                (
+                    ([tid] + tids.tolist())
+                    if (tids := last_pointer.get(None)) is not None
+                    else [tid]
+                ),
+                device=self.tcs.device,
             )
 
         return tree
