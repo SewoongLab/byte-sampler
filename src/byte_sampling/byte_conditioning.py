@@ -91,20 +91,18 @@ class ByteConditioning(object):
     class TokenIndexerCache:
         """Class to cache the arrays of nth bytes of each token"""
 
-        def __init__(self, tcs):
-            self.tcs = tcs
-            self.device = tcs.model.device if tcs.model else "cpu"
+        def __init__(self, vrev, device):
+            self.vrev = vrev
+            self.vsize = max(vrev.keys()) + 1
+            self.device = device
             self.cache = {}
 
         def get_cache(self, idx):
             assert idx >= 0
-            result = [256] * self.tcs.tokenizer.vocab_size
-            for i in range(self.tcs.tokenizer.vocab_size):
-                if i not in self.tcs.vrev:
-                    continue
-                tok = self.tcs.vrev[i]
+            result = [256] * self.vsize
+            for tid, tok in self.vrev.items():
                 if idx < len(tok):
-                    result[i] = tok[idx]
+                    result[tid] = tok[idx]
             return torch.tensor(result, device=self.device)
 
         def get(self, i: int):
@@ -235,20 +233,28 @@ class ByteConditioning(object):
                 pointer = pointer[b]
             pointer[None] = tid
 
+        self.vrev_added = {
+            tid: at.content.encode("utf-8")
+            for tid, at in self.tokenizer.added_tokens_decoder.items()
+            if not at.special
+        }
+
+        self.vrev_special = {
+            tid: at.content.encode("utf-8")
+            for tid, at in self.tokenizer.added_tokens_decoder.items()
+            if at.special
+        }
+
+        # Don't add special tokens here.
+        # They're handled at the StreamingAddedToken layer.
         self.token_slicer = self.TokenSlicer(
-            ChainMap(
-                self.vrev,
-                {
-                    tid: at.content.encode("utf-8")
-                    for tid, at in self.tokenizer.added_tokens_decoder.items()
-                    # Don't add special tokens here. They're handled at the
-                    # StreamingAddedToken layer.
-                    if not at.special
-                },
-            ),
-            self.device,
+            ChainMap(self.vrev, self.vrev_added), self.device
         )
-        self.token_index_cache = self.TokenIndexerCache(self)
+        # TIC handles StreamingAddedToken outputs, so may have special tokens
+        self.token_index_cache = self.TokenIndexerCache(
+            # materialize this so the lookups will be faster
+            dict(ChainMap(self.vrev, self.vrev_added, self.vrev_special)), self.device
+        )
 
     def _preprocess_merges(self, merges):
         # merge_multi_map = {}
