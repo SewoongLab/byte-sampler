@@ -10,7 +10,8 @@ requires-python = ">=3.11"
 dependencies = [
     "accelerate>=1.8.1",
     "ahocorasick-rs>=0.22.2",
-    "pyicu>=2.15.2",
+    'pyicu-wheels>=2.14; python_version >= "3.8" and (sys_platform == "linux" or sys_platform == "darwin")',
+    'pyicu>=2.14; python_version < "3.8" or (sys_platform != "linux" and sys_platform != "darwin")',
     "pysimdjson>=7.0.2",
     "tokenizers>=0.21.2",
     "torch>=2.7.1",
