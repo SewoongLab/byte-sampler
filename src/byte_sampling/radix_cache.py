@@ -85,6 +85,7 @@ class RadixCacheManager:
             for i, layer_tensor in enumerate(cache_tensor):
                 new_shape = list(layer_tensor.shape)
                 new_shape[2] = selector_pt.shape[2]
+                selector_pt = selector_pt.to(layer_tensor.device)
                 cache_tensor[i] = torch.gather(
                     layer_tensor, 2, selector_pt.expand(new_shape)
                 )
