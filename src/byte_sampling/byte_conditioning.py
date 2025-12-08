@@ -20,8 +20,7 @@ from .radix_cache import RadixCacheManager
 from .streaming_added_tokens import StreamingAddedTokens
 from .streaming_bpe import StreamingBPE
 from .streaming_pretok import StreamingCharPretok
-from .utils import (DoublyLinkedList, build_trie, bytes_to_unicode,
-                    scatter_logsumexp)
+from .utils import DoublyLinkedList, build_trie, bytes_to_unicode, scatter_logsumexp
 
 
 class BaseBytewiseBatchSampler(ABC):
