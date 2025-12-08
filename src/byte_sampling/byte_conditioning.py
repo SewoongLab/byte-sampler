@@ -253,7 +253,8 @@ class ByteConditioning(object):
         # TIC handles StreamingAddedToken outputs, so may have special tokens
         self.token_index_cache = self.TokenIndexerCache(
             # materialize this so the lookups will be faster
-            dict(ChainMap(self.vrev, self.vrev_added, self.vrev_special)), self.device
+            dict(ChainMap(self.vrev, self.vrev_added, self.vrev_special)),
+            self.device,
         )
 
     def _preprocess_merges(self, merges):
@@ -605,7 +606,7 @@ class ByteConditioning(object):
                 for b in prompt:
                     new_tokens = self.sbps[i].push(b)
                     for tid in new_tokens:
-                        self.trunk_lens[i] += len(self.bc.vrev.get(tid, 0))
+                        self.trunk_lens[i] += len(self.bc.vrev.get(tid, b""))
                     self.trunks[i].extend(new_tokens)
 
         def add_special_context(self, prompts: list[list[int]]):
