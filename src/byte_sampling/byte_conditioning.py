@@ -20,7 +20,8 @@ from .radix_cache import RadixCacheManager
 from .streaming_added_tokens import StreamingAddedTokens
 from .streaming_bpe import StreamingBPE
 from .streaming_pretok import StreamingCharPretok
-from .utils import DoublyLinkedList, build_trie, bytes_to_unicode, scatter_logsumexp
+from .utils import (DoublyLinkedList, build_trie, bytes_to_unicode,
+                    scatter_logsumexp)
 
 
 class BaseBytewiseBatchSampler(ABC):
@@ -244,17 +245,16 @@ class ByteConditioning(object):
             if at.special
         }
 
+        # materialize this so the lookups will be faster
+        self.vrev_all = dict(ChainMap(self.vrev, self.vrev_added, self.vrev_special))
+
         # Don't add special tokens here.
         # They're handled at the StreamingAddedToken layer.
         self.token_slicer = self.TokenSlicer(
             ChainMap(self.vrev, self.vrev_added), self.device
         )
         # TIC handles StreamingAddedToken outputs, so may have special tokens
-        self.token_index_cache = self.TokenIndexerCache(
-            # materialize this so the lookups will be faster
-            dict(ChainMap(self.vrev, self.vrev_added, self.vrev_special)),
-            self.device,
-        )
+        self.token_index_cache = self.TokenIndexerCache(self.vrev_all, self.device)
 
     def _preprocess_merges(self, merges):
         # merge_multi_map = {}
