@@ -359,7 +359,7 @@ class RadixCacheManager:
             sel, pointer = [], cm.root
             for tid in seq[:-1]:
                 pointer = pointer.children[tid]
-                sel.append(pointer.pos)
+                sel.append(pointer.index)
             selector.append(sel)
 
         new_cache_size = max(map(len, selector))
