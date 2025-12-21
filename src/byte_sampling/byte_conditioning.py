@@ -574,9 +574,10 @@ class ByteConditioning(object):
             self.tic = bc.token_index_cache
             self.batch_size = batch_size
             self.sbps = [bc.get_streaming_byte_tree() for _ in range(batch_size)]
+            bos_len = len(self.bc.vrev_all[self.bc.bos])
             self.trunks = [[self.bc.bos] for _ in range(batch_size)]
-            self.lens = [0 for _ in range(batch_size)]
-            self.trunk_lens = [0 for _ in range(batch_size)]
+            self.lens = [bos_len for _ in range(batch_size)]
+            self.trunk_lens = [bos_len for _ in range(batch_size)]
             self.total_dist_time = 0
             self.filter_tensors = filter_tensors
             self.do_gc = do_gc
@@ -605,7 +606,7 @@ class ByteConditioning(object):
                 for b in prompt:
                     new_tokens = self.sbps[i].push(b)
                     for tid in new_tokens:
-                        self.trunk_lens[i] += len(self.bc.vrev.get(tid, b""))
+                        self.trunk_lens[i] += len(self.bc.vrev_all[tid])
                     self.trunks[i].extend(new_tokens)
 
         def add_special_context(self, prompts: list[list[int]]):
@@ -614,8 +615,11 @@ class ByteConditioning(object):
                 if prompt:
                     self.trunks[i].extend(self.sbps[i].split())
                     self.trunks[i].extend(prompt)
-                    self.trunk_lens[i] = 0
-                    self.lens[i] = 0
+                    for tid in prompt:
+                        self.lens[i] += len(self.bc.vrev_all[tid])
+
+                    # Due to the split, we are now fully "caught up"
+                    self.trunk_lens[i] = self.lens[i]
 
         def tree_inference(
             self,
@@ -696,7 +700,7 @@ class ByteConditioning(object):
                             extract_bytes(
                                 eval_subtree,
                                 lp_subtree,
-                                past_bytes + len(self.bc.vrev.get(tid, b"")),
+                                past_bytes + len(self.bc.vrev_all[tid]),
                             )
 
                 extract_bytes(branches, logprob_tree, self.trunk_lens[i])
