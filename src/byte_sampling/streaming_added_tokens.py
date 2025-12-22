@@ -47,18 +47,11 @@ class StreamingAddedTokens:
 
     def __init__(self, tcs, special_tokens=None):
         self.tcs = tcs
-        self.base_scp = tcs.get_streaming_char_pretok()
-        self.base_idx = 0
         self.normalizer = tcs.tokenizer.backend_tokenizer.normalizer
-
         self._zero_state = self.State(0, 0)
         self._zero_state.longest_strict_suffix = self._zero_state
         self._counter = 1
-        self.state = self._zero_state
-        self.idx = 0
-        self.chain = deque()
-        self.buf = RingDeque(initial_capacity=16)
-        self.buf_idx = 0
+        self.reset()
 
         self.added = {}
 
@@ -410,6 +403,36 @@ class StreamingAddedTokens:
             )
 
         return tree
+
+    def reset(self):
+        self.state = self._zero_state
+        self.idx = 0
+        self.chain = deque()
+        self.buf = RingDeque(initial_capacity=16)
+        self.buf_idx = 0
+        self.base_scp = self.tcs.get_streaming_char_pretok()
+        self.base_idx = 0
+
+    def split(self):
+        outbuf = []
+        scp, r = self.base_scp, self.base_idx
+
+        # Commit any pending added-token matches (including any gaps before them).
+        for chain_match in self.chain:
+            scp, r = chain_match.scp, chain_match.r
+            outbuf.extend(chain_match.outbuf)
+            outbuf.append(chain_match.tid)
+
+        # Tokenize any remaining buffered chars after the last match.
+        if r < self.idx:
+            for char in self.buf[r - self.buf_idx : self.idx - self.buf_idx]:
+                outbuf.extend(scp.push(char))
+
+        outbuf.extend(scp.split())
+
+        self.reset()
+
+        return outbuf
 
     def __str__(self):
         return f"StreamingAddedTokens({self.chain!r})"
