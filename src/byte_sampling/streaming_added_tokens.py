@@ -6,6 +6,7 @@ from typing import Self
 import torch
 from icu import CanonicalIterator, UnicodeString
 
+from .streaming_bpe import StreamingBPE
 from .streaming_pretok import StreamingCharPretok
 from .utils import RingDeque, build_trie
 
@@ -388,10 +389,11 @@ class StreamingAddedTokens:
             state = state.longest_strict_suffix
 
         assert r == self.idx
-        pointer.update(
+        StreamingBPE.tree_update(
+            pointer,
             scp.eval_tree(
                 suffix=suffix, inclusive=inclusive, filter_tensors=filter_tensors
-            )
+            ),
         )
 
         # Move the terminating branch into the tensor if inclusive is False

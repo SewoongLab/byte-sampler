@@ -248,11 +248,9 @@ class ByteConditioning(object):
         # materialize this so the lookups will be faster
         self.vrev_all = dict(ChainMap(self.vrev, self.vrev_added, self.vrev_special))
 
-        # Don't add special tokens here.
+        # Don't add special or added tokens here.
         # They're handled at the StreamingAddedToken layer.
-        self.token_slicer = self.TokenSlicer(
-            ChainMap(self.vrev, self.vrev_added), self.device
-        )
+        self.token_slicer = self.TokenSlicer(self.vrev, self.device)
         # TIC handles StreamingAddedToken outputs, so may have special tokens
         self.token_index_cache = self.TokenIndexerCache(self.vrev_all, self.device)
 
