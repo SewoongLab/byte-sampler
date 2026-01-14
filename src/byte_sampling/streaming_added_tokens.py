@@ -205,17 +205,22 @@ class StreamingAddedTokens:
                 if self.chain:
                     scp, last_r = self.chain[-1].scp.fork(), self.chain[-1].r
                 else:
-                    # here, we can push the output out immediately
-                    # because we know for sure a split is happening here
-                    # print(f"{self.buf[self.base_idx:lidx]=}")
-                    for c in self.buf[
-                        self.base_idx - self.buf_idx : lidx - self.buf_idx
-                    ]:
-                        outbuf.extend(self.base_scp.push(c))
-                    outbuf.extend(self.base_scp.split())
+                    # Only commit the split immediately if no earlier-starting
+                    # match can still extend past lidx.
+                    if root_idx < lidx and not self.state.terminal:
+                        scp, last_r = self.base_scp.fork(), self.base_idx
+                    else:
+                        # here, we can push the output out immediately
+                        # because we know for sure a split is happening here
+                        # print(f"{self.buf[self.base_idx:lidx]=}")
+                        for c in self.buf[
+                            self.base_idx - self.buf_idx : lidx - self.buf_idx
+                        ]:
+                            outbuf.extend(self.base_scp.push(c))
+                        outbuf.extend(self.base_scp.split())
 
-                    self.base_idx = lidx
-                    scp, last_r = self.base_scp.fork(), self.base_idx
+                        self.base_idx = lidx
+                        scp, last_r = self.base_scp.fork(), self.base_idx
 
                 gap_outbuf = []
                 for char in self.buf[last_r - self.buf_idx : lidx - self.buf_idx]:
