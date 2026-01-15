@@ -37,8 +37,8 @@ TOKENIZERS = {
     "comma": "common-pile/comma-v0.1-1t",
     "apertus": "swiss-ai/Apertus-8B-2509",
     "kl3m": "alea-institute/kl3m-003-1.7b",
-    "nomotronh": "nvidia/Nemotron-H-8B-Base-8K",
-    "nomotronnano": "nvidia/NVIDIA-Nemotron-Nano-9B-v2",
+    "nemotronh": "nvidia/Nemotron-H-8B-Base-8K",
+    "nemotronnano": "nvidia/NVIDIA-Nemotron-Nano-9B-v2",
     "bpe": "UW/OLMo2-8B-BPE",
     "superbpe": "UW/OLMo2-8B-SuperBPE-t180k",
 }
