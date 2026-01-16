@@ -293,6 +293,51 @@ class StreamingAddedTokens:
         pointer = tree = {}
         last_pointer = None
         scp, r = self.base_scp, self.base_idx
+        suffix_text, suffix_tail = ("", b"")
+        if suffix:
+            try:
+                suffix_text = suffix.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                # Keep a trailing incomplete UTF-8 sequence as raw bytes
+                suffix_text = suffix[: exc.start].decode("utf-8", errors="strict")
+                suffix_tail = suffix[exc.start:]
+
+        def advance_state(state, text):
+            for char in text:
+                if (new_state := state.transitions.get(char)) is None:
+                    return None
+                if new_state.depth <= state.depth:
+                    return None
+                state = new_state
+            return state
+
+        # This filters the next nodes by the partial char suffix_tail
+        def tail_candidates(state):
+            if not suffix_tail:
+                return [state]
+
+            candidates = []
+            for char, next_state in state.transitions.items():
+                if next_state.depth <= state.depth:
+                    continue
+                if char.encode("utf-8").startswith(suffix_tail):
+                    candidates.append(next_state)
+            return candidates
+
+        def tail_tensor(state, *, exclude_tid=None):
+            if state is None:
+                return None
+
+            candidates = tail_candidates(state)
+            if candidates:
+                tids = set()
+                for candidate in candidates:
+                    tids.update(self._walk_state(candidate))
+                if exclude_tid is not None:
+                    tids.discard(exclude_tid)
+                return torch.tensor(
+                    sorted(tids), device=self.tcs.device
+                )
 
         # Advance the state according to the chain
         for chain_match in self.chain:
@@ -301,32 +346,14 @@ class StreamingAddedTokens:
             # Need to "fast forward" the state to reflect the rest of the
             # prefix + suffix. This is still an overapproximation, since
             # some of these may violate the lefmost-longest match semantics
-            replay_state = chain_match.state
-            # for b in it.chain(self.buf[r - self.buf_idx :], suffix):
-            #     new_state = replay_state.transitions[b]
-            #     # We know we'll never take a shortcut transition
-            #     assert new_state.depth > replay_state.depth
-            #     replay_state = new_state
-
-            for b in it.chain(self.buf[r - self.buf_idx :], suffix):
-                # If there's no outbound transition, then there's no matches here
-                if (new_state := replay_state.transitions.get(b)) is None:
-                    break
-
-                # If we take a shortcut, then there's no matches here
-                if new_state.depth <= replay_state.depth:
-                    break
-
-                replay_state = new_state
-            else:
-                pointer[None] = torch.tensor(
-                    [
-                        tid
-                        for tid in self._walk_state(replay_state)
-                        if tid != chain_match.tid
-                    ],
-                    device=self.tcs.device,
-                )
+            replay_state = advance_state(
+                chain_match.state,
+                it.chain(self.buf[r - self.buf_idx :], suffix_text)
+            )
+            if (tail_tids := tail_tensor(
+                replay_state, exclude_tid=chain_match.tid
+            )) is not None:
+                pointer[None] = tail_tids
 
             for tid in it.chain(chain_match.outbuf, (chain_match.tid,)):
                 last_pointer, pointer = pointer, pointer.setdefault(tid, {})
@@ -358,33 +385,23 @@ class StreamingAddedTokens:
             split_pointer = pointer
 
             # Add the special tokens that potentially match from here
-            if state is self._zero_state:
-                break
-
             split_scp = scp.fork()
             split_outbuf = split_scp.split()
             for tid in split_outbuf:
                 split_pointer = split_pointer.setdefault(tid, {})
 
+            # split_outbuf must encode the fast-forwarded BUF, so split_pointer
+            # cannot already contain None here.
             assert None not in split_pointer, f"{split_pointer}"
             # Need to "fast forward" the state to reflect the rest of the
             # suffix. This is still an overapproximation, since
             # some of these may violate the lefmost-longest match semantics
-            suffix_state = state
-            for b in suffix:
-                # If there's no outbound transition, then there's no matches here
-                if (new_state := suffix_state.transitions.get(b)) is None:
-                    break
+            suffix_state = advance_state(state, suffix_text)
+            if (tail_tids := tail_tensor(suffix_state)) is not None:
+                split_pointer[None] = tail_tids
 
-                # If we take a shortcut, then there's no matches here
-                if new_state.depth <= suffix_state.depth:
-                    break
-
-                suffix_state = new_state
-            else:
-                split_pointer[None] = torch.tensor(
-                    list(self._walk_state(suffix_state)), device=self.tcs.device
-                )
+            if state is self._zero_state:
+                break
 
             state = state.longest_strict_suffix
 
