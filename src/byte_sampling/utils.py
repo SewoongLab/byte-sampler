@@ -268,7 +268,11 @@ def sample_from_prob_tree(
 
 
 def scatter_logsumexp(
-    src: torch.Tensor, index: torch.Tensor, *, dim_size: int | None = None
+    src: torch.Tensor,
+    index: torch.Tensor,
+    *,
+    dim_size: int | None = None,
+    safe_all_neg_inf: bool = False,
 ) -> torch.Tensor:
     """
     Numerically-stable grouped log-sum-exp.
@@ -286,13 +290,24 @@ def scatter_logsumexp(
     # 1. per-bucket max for numerical stability
     m = src.new_full((dim_size,), -torch.inf)
     m.scatter_reduce_(0, index, src.detach(), reduce="amax", include_self=False)
-    # handle the all-(-inf) case
-    m = torch.nan_to_num(m, nan=None, neginf=0, out=None if m.requires_grad else m)
+    if not safe_all_neg_inf:
+        # handle the all-(-inf) case
+        m = torch.nan_to_num(m, nan=None, neginf=0, out=None if m.requires_grad else m)
+        # 2. exponentiate shifted values and sum per bucket
+        shifted_exp = (src - m[index]).exp()
+        s = torch.zeros_like(m).scatter_add_(0, index, shifted_exp)
+        # 3. log-sum-exp
+        return m + s.log()
+
+    all_neg_inf = torch.isneginf(m)
+    m = torch.where(all_neg_inf, torch.zeros_like(m), m)
     # 2. exponentiate shifted values and sum per bucket
     shifted_exp = (src - m[index]).exp()
     s = torch.zeros_like(m).scatter_add_(0, index, shifted_exp)
+    s = torch.where(all_neg_inf, torch.ones_like(s), s)
     # 3. log-sum-exp
-    return m + s.log()
+    out = m + s.log()
+    return torch.where(all_neg_inf, m.new_full(out.shape, -torch.inf), out)
 
 
 class DoublyLinkedList:
