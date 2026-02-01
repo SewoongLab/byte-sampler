@@ -87,13 +87,16 @@ class RadixCacheManager:
             selector_pt = selector_pt.to(layer_tensor.device)
             new_shape = list(layer_tensor.shape)
             new_shape[2] = selector_pt.shape[2]
-            return torch.gather(
-                layer_tensor, 2, selector_pt.expand(new_shape)
-            )
+            return torch.gather(layer_tensor, 2, selector_pt.expand(new_shape))
 
-        for layer in self.cache.layers:
-            layer.keys = select_kv(layer.keys)
-            layer.values = select_kv(layer.values)
+        new_key_cache = []
+        new_value_cache = []
+        for key, value in zip(self.cache.key_cache, self.cache.value_cache):
+            new_key_cache.append(select_kv(key))
+            new_value_cache.append(select_kv(value))
+
+        self.cache.key_cache = new_key_cache
+        self.cache.value_cache = new_value_cache
 
         # now update the metadata
         for i, (cache, select) in enumerate(zip(self.cache_meta, selector)):
