@@ -1,5 +1,5 @@
 import itertools as it
-import re
+import regex
 import string
 from collections import deque
 from copy import copy
@@ -146,9 +146,48 @@ class WhitespaceLookaheadHandler(PretokExceptionHandler):
 
         self.has_split = self.pretok_pattern("  a") == (1,)
 
+        # Some pretokenizers have a greedy newline branch (typically like
+        # `\s*[\r\n]+`) which can retroactively absorb preceding whitespace once a
+        # trailing newline arrives. This makes the split after the most recent
+        # newline unstable while we're still in trailing-whitespace territory.
+        self.newline_absorbs_ws = (
+            self.pretok_pattern("\n ") == (1,)
+            and self.pretok_pattern("\n \n") == ()
+        ) or (
+            self.pretok_pattern("\r ") == (1,)
+            and self.pretok_pattern("\r \r") == ()
+        )
+
+        # One-pass context regex (reverse search):
+        # - Requires >= 2 trailing whitespace chars (group `ws2`).
+        # - Captures the last newline immediately followed by non-newline
+        #   whitespace (group `nl`) to identify the unstable newline boundary.
+        self._re_ws_ctx = regex.compile(
+            r"((?P<nl>[\r\n])[^\S\r\n]+)?(?<=(?P<ws2>\s\s))\Z",
+            flags=regex.REVERSE,
+        )
+
     def get_splits(self, s):
-        if self.has_split and len(s) >= 2 and s[-2:].isspace():
-            return {(), (-1,)}
+        if not self.has_split:
+            return
+        m = self._re_ws_ctx.search(s)
+        if not m or m.group("ws2") is None:
+            return
+
+        end_nl = s.endswith(("\n", "\r"))
+        ws_cases = (
+            {()}
+            if self.newline_absorbs_ws and end_nl
+            else {(), (-1,)}
+        )
+        nl_cases = {()}
+        if self.newline_absorbs_ws and m.group("nl") is not None:
+            split_abs = m.end("nl")
+            if split_abs in self.pretok_pattern(s):
+                nl_cases = {(), (split_abs - len(s),)}
+
+        cases = {tuple(sorted({*a, *b})) for a in ws_cases for b in nl_cases}
+        return cases if len(cases) > 1 else None
 
 
 class DigitAlignmentHandler(PretokExceptionHandler):
